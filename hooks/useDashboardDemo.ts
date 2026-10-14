@@ -19,7 +19,7 @@ export function useDashboardDemo() {
   const [currentPlan, setCurrentPlan] = useState<ActionPlan | null>(null);
   const [analysisError, setAnalysisError] = useState<string | null>(null);
   const [executionSteps, setExecutionSteps] = useState<ExecutionStepResult[]>([]);
-  const [executionStatus, setExecutionStatus] = useState<'IDLE' | 'RUNNING' | 'SUCCESS' | 'FAILED'>('IDLE');
+  const [executionStatus, setExecutionStatus] = useState<'IDLE' | 'RUNNING' | 'SUCCESS' | 'FAILED' | 'SENT'>('IDLE');
   const [executionError, setExecutionError] = useState<string | null>(null);
   const [logs, setLogs] = useState<LogEntry[]>(INITIAL_LOGS);
   const [isExecuting, setIsExecuting] = useState(false);
@@ -89,7 +89,9 @@ export function useDashboardDemo() {
   }, []);
 
   useEffect(() => {
-    void refreshAndroidDevices();
+    let active = true;
+    queueMicrotask(() => { if (active) void refreshAndroidDevices(); });
+    return () => { active = false; };
   }, [refreshAndroidDevices]);
 
   const handleCommandChange = useCallback((value: string) => {
@@ -245,13 +247,27 @@ export function useDashboardDemo() {
       let buffer = '';
       let completed = false;
 
+      const loggedStates = new Map<number, string>();
       const applyEvent = (line: string) => {
         if (!line.trim()) return;
         const event = JSON.parse(line) as ExecutionStreamEvent;
         setExecutionSteps(event.steps);
+        if (event.type === 'progress') {
+          const confirmedLogs: LogEntry[] = [];
+          for (const step of event.steps) {
+            const key = `${step.status}:${step.phase}:${step.waitingFor}:${step.errorCode}:${step.exploration?.phase}:${step.exploration?.scrollCount}:${step.exploration?.status}`;
+            if (step.status === 'PENDING' || loggedStates.get(step.index) === key) continue;
+            loggedStates.set(step.index, key);
+            confirmedLogs.push({ id: `step-${Date.now()}-${step.index}`, timestamp: new Date().toTimeString().split(' ')[0],
+              deviceId: targetDevice.serial, deviceName: targetDevice.model,
+              message: `${step.action.type}: ${step.errorCode ?? step.exploration?.phase ?? step.phase ?? step.status}${step.waitingFor ? ` (${step.waitingFor})` : ''}${step.exploration ? ` - cuộn ${step.exploration.scrollCount}, snapshot ${step.exploration.snapshotCount}, mới ${step.exploration.newElements}, trùng ${step.exploration.duplicateElements}` : ''}${step.postcondition ? ` - ${step.postcondition}` : ''}`,
+              status: step.status === 'FAILED' ? 'FAILED' : step.status === 'SUCCESS' ? 'SUCCESS' : step.status === 'SENT' ? 'INFO' : 'EXECUTING' });
+          }
+          if (confirmedLogs.length) setLogs((previous) => [...confirmedLogs.reverse(), ...previous].slice(0, 500));
+        }
         if (event.type === 'complete') {
           completed = true;
-          setExecutionStatus(event.success ? 'SUCCESS' : 'FAILED');
+          setExecutionStatus(event.status ?? (event.success ? 'SUCCESS' : 'FAILED'));
           setExecutionError(event.error ?? null);
           const timestamp = new Date().toTimeString().split(' ')[0];
           setLogs((previous) => [{
@@ -259,8 +275,8 @@ export function useDashboardDemo() {
             timestamp,
             deviceId: targetDevice.serial,
             deviceName: targetDevice.model,
-            message: event.success ? 'Thực thi Action Plan hoàn tất.' : event.error || 'Thực thi Action Plan thất bại.',
-            status: event.success ? 'SUCCESS' : 'FAILED',
+            message: event.success ? 'Thực thi và xác minh Action Plan hoàn tất.' : event.status === 'SENT' ? 'Đã gửi thao tác; mục tiêu giao diện chưa được xác minh đầy đủ.' : event.error || 'Thực thi Action Plan thất bại.',
+            status: event.success ? 'SUCCESS' : event.status === 'SENT' ? 'INFO' : 'FAILED',
           }, ...previous]);
           if (event.success) void refreshAndroidDevices();
         }
@@ -277,13 +293,16 @@ export function useDashboardDemo() {
       if (buffer.trim()) applyEvent(buffer);
       if (!completed) throw new Error('Luồng thực thi kết thúc trước khi có kết quả cuối.');
     } catch (error) {
-      const message = error instanceof Error && error.name === 'AbortError'
+      const cancelled = controller.signal.aborted || error instanceof Error && error.name === 'AbortError';
+      const message = cancelled
         ? 'Đã dừng thực thi theo yêu cầu.'
         : error instanceof Error ? error.message : 'Thực thi Action Plan thất bại.';
       setExecutionError(message);
       setExecutionStatus('FAILED');
       setExecutionSteps((previous) => previous.map((step) =>
-        step.status === 'EXECUTING' ? { ...step, status: 'FAILED', error: message } : step
+        step.status === 'EXECUTING' ? { ...step, status: 'FAILED', phase: undefined, error: message,
+          errorCode: cancelled ? 'CANCELLED' : step.errorCode,
+          exploration: step.exploration ? { ...step.exploration, phase: 'NOT_FOUND', status: cancelled ? 'CANCELLED' : step.exploration.status, reason: message } : undefined } : step
       ));
       const timestamp = new Date().toTimeString().split(' ')[0];
       setLogs((previous) => [{

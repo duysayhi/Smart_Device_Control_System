@@ -57,7 +57,7 @@ export default function DashboardPage() {
       {/* Khu vực giữa: Live Device Grid (65-70%) & AI Command Panel (30-35%) */}
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
         {/* 7. Live Device Grid - Chiếm 7-8/12 cột (khoảng 65-70%) */}
-        <section className="lg:col-span-8 flex flex-col">
+        <section className="lg:col-span-8 flex flex-col min-w-0">
           <DeviceGrid
             devices={devices}
             selectedDeviceIds={selectedDeviceIds}
@@ -70,7 +70,7 @@ export default function DashboardPage() {
         </section>
 
         {/* 8. AI Command Panel - Chiếm 4/12 cột (khoảng 30-35%) */}
-        <aside className="lg:col-span-4 flex flex-col">
+        <aside className="lg:col-span-4 flex flex-col min-w-0">
           <AICommandPanel
             commandText={commandText}
             onCommandChange={handleCommandChange}

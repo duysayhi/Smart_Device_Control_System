@@ -13,7 +13,7 @@ require.extensions['.ts'] = (module, filename) => {
   module._compile(outputText, filename);
 };
 const { parseUiHierarchy, findUiTarget } = require('../lib/android/targets.ts');
-const { validateAndroidPlan, needsAdbKeyboard, ADB_KEYBOARD } = require('../lib/android/capabilities.ts');
+const { validateAndroidPlan, needsAdbKeyboard, ADB_KEYBOARD, androidCapabilityPrompt } = require('../lib/android/capabilities.ts');
 const { createAndroidExecutor, quoteAndroidShell } = require('../lib/android/executor.ts');
 
 const node = (attributes = '') => `<node package="com.google.android.youtube" enabled="true" clickable="true" bounds="[10,20][110,80]" ${attributes}/>`;
@@ -89,6 +89,21 @@ test('plan validation rejects unknown targets, unsupported apps and wrong semant
   assert.throws(() => validateAndroidPlan([{ type: 'CLICK', target: 'search_button' }]), /YouTube|youtube/);
   assert.throws(() => validateAndroidPlan([open, { type: 'SCREENSHOT' }]), /Unsupported action/);
   assert.throws(() => validateAndroidPlan([open, { type: 'CLICK', target: 'video_list' }]), /video_card/);
+});
+
+test('Appium validates video ordinals beyond five while ADB retains its limit', () => {
+  for (const ordinal of [6, 10, 99]) {
+    const actions = [open, { type: 'WAIT_FOR', target: `video_card_${ordinal}`, timeoutMs: 20000 }, { type: 'CLICK', target: `video_card_${ordinal}` }];
+    validateAndroidPlan(actions, true);
+    assert.throws(() => validateAndroidPlan(actions), /Unsupported target/);
+  }
+  for (const target of ['video_card_0', 'video_card_100', 'video_card_06', 'video_card_6junk']) {
+    assert.throws(() => validateAndroidPlan([open, { type: 'CLICK', target }], true), /1\.\.99/);
+  }
+  assert.throws(() => validateAndroidPlan([{ type: 'OPEN_APP', app: 'chrome' }, { type: 'CLICK', target: 'video_card_6' }], true), /youtube/);
+  assert.throws(() => validateAndroidPlan([open, { type: 'CLICK', target: 'video_list' }], true), /not video_list/);
+  assert.match(androidCapabilityPrompt(true), /video_card_1\.\.99/);
+  assert.doesNotMatch(androidCapabilityPrompt(false), /video_card_1\.\.99/);
 });
 
 test('WAIT_FOR retries the hierarchy; CLICK uses fresh bounds', async () => {

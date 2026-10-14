@@ -53,15 +53,15 @@ export function createAndroidExecutor(run: AdbRunner) {
     throw new Error('The focused field did not contain the requested text after input.');
   }
 
-  async function preflight(serial: string, actions: Action[]) {
-    validateAndroidPlan(actions);
+  async function preflight(serial: string, actions: Action[], requiresAdbKeyboard = true, dynamicUi = false) {
+    validateAndroidPlan(actions, dynamicUi);
     const packages = new Set(actions.flatMap((action) =>
       action.type === 'OPEN_APP' || action.type === 'CLOSE_APP' ? [resolveAppPackage(action.app)] : []));
     for (const app of packages) {
       const output = await shell(serial, ['pm', 'path', app]);
       if (!output.startsWith('package:')) throw new Error(`App is not installed: ${app}.`);
     }
-    if (actions.some((action) => action.type === 'INPUT_TEXT' && needsAdbKeyboard(action.text))) {
+    if (requiresAdbKeyboard && actions.some((action) => action.type === 'INPUT_TEXT' && needsAdbKeyboard(action.text))) {
       const keyboards = await shell(serial, ['ime', 'list', '-s']);
       if (!keyboards.split(/\r?\n/).includes(ADB_KEYBOARD)) {
         throw new Error('Vietnamese/Unicode input requires installed and enabled ADB Keyboard (com.android.adbkeyboard/.AdbIME). No actions were executed.');

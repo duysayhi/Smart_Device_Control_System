@@ -1,14 +1,15 @@
 import { z } from 'zod';
-import { executeAndroidAction, isValidAndroidSerial, listAndroidDevices, preflightAndroidPlan } from '@/lib/android/adb';
+import { isValidAndroidSerial, listAndroidDevices, runAdb } from '@/lib/android/adb';
+import { assertNonSensitivePlan, createExecutionContext } from '@/lib/android/condition-executor';
+import { asAndroidError, checkCancellation } from '@/lib/android/errors';
 import { ActionPlanSchema } from '@/lib/validators/action-plan.schema';
 import { ExecutionStepResult, ExecutionStreamEvent } from '@/types/execution';
+import { assessPlanPolicy } from '@/lib/android/security-policy';
 
 const ExecutionRequestSchema = z.object({
   deviceId: z.string().min(1).max(128),
   actionPlan: ActionPlanSchema,
 });
-
-const busyDevices = new Set<string>();
 
 export async function POST(request: Request) {
   const body = await request.json().catch(() => null);
@@ -52,15 +53,16 @@ export async function POST(request: Request) {
   }
 
   const { deviceId, actionPlan } = parsed.data;
-  if (busyDevices.has(deviceId)) {
-    return Response.json({ success: false, error: 'Thiết bị đang thực thi một kế hoạch khác.' }, { status: 409 });
-  }
-  busyDevices.add(deviceId);
+  const policy = assessPlanPolicy(actionPlan);
+  const cancellation = new AbortController();
+  const signal = AbortSignal.any([request.signal, cancellation.signal, AbortSignal.timeout(300000)]);
+  let execution: Awaited<ReturnType<typeof createExecutionContext>>;
   try {
-    await preflightAndroidPlan(deviceId, actionPlan.actions);
+    assertNonSensitivePlan(actionPlan);
+    execution = await createExecutionContext(deviceId, actionPlan.actions, runAdb, signal);
   } catch (error) {
-    busyDevices.delete(deviceId);
-    return Response.json({ success: false, error: error instanceof Error ? error.message : 'Kế hoạch không thể thực thi.' }, { status: 422 });
+    const failure = asAndroidError(error);
+    return Response.json({ success: false, error: failure.message, errorCode: failure.code, policy }, { status: failure.code === 'SESSION_ERROR' ? 409 : 422 });
   }
   const encoder = new TextEncoder();
   let cancelled = false;
@@ -70,6 +72,7 @@ export async function POST(request: Request) {
         index,
         action,
         status: 'PENDING',
+        deviceId,
       }));
 
       const send = (event: ExecutionStreamEvent) => {
@@ -78,45 +81,76 @@ export async function POST(request: Request) {
 
       void (async () => {
         let executionError: string | undefined;
+        let errorCode: ExecutionStepResult['errorCode'];
+        try {
         send({ type: 'progress', steps: [...steps] });
-
         for (const step of steps) {
-          if (cancelled) return;
+          checkCancellation(signal);
           step.status = 'EXECUTING';
+          step.phase = 'EXECUTING';
           send({ type: 'progress', steps: [...steps] });
-
+          const stepStarted = performance.now();
           try {
-            await executeAndroidAction(deviceId, actionPlan.actions[step.index]);
-            step.status = 'SUCCESS';
+            const outcome = await execution.execute(actionPlan.actions[step.index], signal, (progress) => {
+              step.phase = 'WAITING'; step.waitingFor = progress.waitingFor;
+              step.elapsedMs = progress.elapsedMs; step.evidence = progress.evidence;
+              if (progress.exploration) step.exploration = progress.exploration;
+              send({ type: 'progress', steps: [...steps] });
+            });
+            Object.assign(step, outcome);
+            step.phase = undefined;
+            step.status = outcome.verification === 'VERIFIED' ? 'SUCCESS' : 'SENT';
           } catch (error) {
+            const failure = asAndroidError(error);
             step.status = 'FAILED';
-            step.error = error instanceof Error ? error.message : 'Thực thi action thất bại.';
+            step.phase = undefined;
+            step.error = failure.message; step.errorCode = failure.code;
+            if (failure.exploration) step.exploration = failure.exploration;
+            if (failure.visual) step.visual = failure.visual;
+            if (failure.visualFailure) step.visualFailure = failure.visualFailure;
+            step.elapsedMs = Math.round(performance.now() - stepStarted);
+            errorCode = failure.code;
             executionError = step.error;
           }
 
           send({ type: 'progress', steps: [...steps] });
           if (step.status === 'FAILED') break;
         }
-
+        } catch (error) {
+          const failure = asAndroidError(error);
+          executionError = failure.message; errorCode = failure.code;
+        } finally {
+          try { await execution.close(); }
+          catch (error) {
+            const failure = asAndroidError(error);
+            executionError = `Session cleanup failed: ${failure.message}`; errorCode = 'SESSION_ERROR';
+          }
+        }
         if (!cancelled) {
+          const success = !executionError && steps.every((step) => step.status === 'SUCCESS');
           send({
             type: 'complete',
-            success: steps.every((step) => step.status === 'SUCCESS'),
+            success,
+            status: executionError ? 'FAILED' : success ? 'SUCCESS' : 'SENT',
             steps: [...steps],
             ...(executionError ? { error: executionError } : {}),
+            ...(errorCode ? { errorCode } : {}),
           });
         }
       })()
         .catch(() => {
-          if (!cancelled) controller.error(new Error('Luồng thực thi ADB bị gián đoạn.'));
+          if (!cancelled) {
+            cancelled = true;
+            controller.error(new Error('Luồng thực thi Android bị gián đoạn.'));
+          }
         })
         .finally(() => {
-          busyDevices.delete(deviceId);
           if (!cancelled) controller.close();
         });
     },
     cancel() {
       cancelled = true;
+      cancellation.abort();
     },
   });
 

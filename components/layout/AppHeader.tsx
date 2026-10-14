@@ -1,7 +1,7 @@
 'use client';
 
 import React from 'react';
-import { Search, Bell, ChevronDown, User, ShieldCheck } from 'lucide-react';
+import { Search, Bell, ChevronDown, ShieldCheck } from 'lucide-react';
 
 interface AppHeaderProps {
   searchQuery: string;
@@ -15,21 +15,21 @@ export const AppHeader: React.FC<AppHeaderProps> = ({
   unreadAlertCount = 2,
 }) => {
   return (
-    <header className="h-[72px] px-6 bg-white border-b border-slate-200 flex items-center justify-between sticky top-0 z-20 shrink-0">
+    <header className="min-h-[72px] px-2 md:px-6 py-2 gap-2 bg-white border-b border-slate-200 flex items-center justify-between sticky top-0 z-20 shrink-0">
       {/* Bên trái: Tiêu đề lớn và dòng mô tả */}
-      <div>
-        <h2 className="text-xl font-bold text-slate-800 tracking-tight leading-none">
+      <div className="min-w-0">
+        <h2 className="text-sm md:text-xl font-bold text-slate-800 leading-tight">
           Hệ thống điều khiển nhiều điện thoại
         </h2>
-        <p className="text-xs text-slate-500 font-medium mt-1">
+        <p className="hidden md:block text-xs text-slate-500 font-medium mt-1">
           Điều phối thiết bị Android / iOS bằng câu lệnh tự nhiên
         </p>
       </div>
 
       {/* Bên phải: Tìm kiếm, thông báo, user profile */}
-      <div className="flex items-center gap-4">
+      <div className="flex shrink-0 items-center gap-1 md:gap-4">
         {/* Search Input */}
-        <div className="relative w-72">
+        <div className="hidden xl:block relative w-72">
           <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
           <input
             type="text"
@@ -55,7 +55,7 @@ export const AppHeader: React.FC<AppHeaderProps> = ({
         </button>
 
         {/* User Dropdown Profile */}
-        <div className="flex items-center gap-2.5 pl-3 border-l border-slate-200 cursor-pointer group">
+        <div className="hidden md:flex items-center gap-2.5 pl-3 border-l border-slate-200 cursor-pointer group">
           <div className="w-8 h-8 rounded-full bg-indigo-100 border border-indigo-200 flex items-center justify-center text-indigo-700 font-semibold text-xs shadow-sm">
             PK
           </div>

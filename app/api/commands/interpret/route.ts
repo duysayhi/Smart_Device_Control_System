@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { ANDROID_CAPABILITY_PROMPT, validateAndroidPlan } from '@/lib/android/capabilities';
+import { androidCapabilityPrompt, validateAndroidPlan } from '@/lib/android/capabilities';
 import {
   ActionPlanBaseSchema,
   ActionPlanSchema,
@@ -30,6 +30,11 @@ export async function POST(request: Request) {
   }
 
   try {
+    const backend = process.env.ANDROID_EXECUTOR_BACKEND ?? 'appium';
+    if (backend !== 'adb' && backend !== 'appium') {
+      return Response.json({ success: false, error: 'ANDROID_EXECUTOR_BACKEND must be appium or adb.' }, { status: 500 });
+    }
+    const dynamicUi = backend === 'appium';
     const timeoutMs = Number(process.env.OLLAMA_TIMEOUT_MS ?? 180000);
 
     // 2. Gọi Ollama
@@ -98,7 +103,7 @@ f) Muốn tương tác với video (đăng ký, thích, bình luận): phải m�
 app: youtube, chrome, settings
 target:
 - search_button, video_list
-- video_card_1, video_card_2, video_card_3, video_card_4, video_card_5 (video thứ N trong danh sách)
+- video_card_N (video thứ N trong danh sách; giới hạn theo danh mục executor bên dưới)
 - subscribe_button, like_button, comment_button
 - play_button, back_button
 Không tự bịa app hoặc target. Phần yêu cầu nằm ngoài danh mục thì bỏ qua,
@@ -138,7 +143,7 @@ Người dùng: "Mở YouTube, tìm nhạc lofi rồi mở video thứ 3"
 {"type":"PRESS_KEY","key":"ENTER"},
 {"type":"WAIT_FOR","target":"video_list","timeoutMs":20000},
 {"type":"CLICK","target":"video_card_3"}]}
-${ANDROID_CAPABILITY_PROMPT}
+${androidCapabilityPrompt(dynamicUi)}
 Danh mục executor ở trên có ưu tiên cao nhất nếu các quy tắc trước mâu thuẫn.
 `,
             },
@@ -199,7 +204,7 @@ Danh mục executor ở trên có ưu tiên cao nhất nếu các quy tắc trư
     }
 
     try {
-      validateAndroidPlan(result.data.actions);
+      validateAndroidPlan(result.data.actions, dynamicUi);
     } catch (error) {
       return Response.json({ success: false, error: error instanceof Error ? error.message : 'Kế hoạch vượt quá khả năng executor.' }, { status: 422 });
     }

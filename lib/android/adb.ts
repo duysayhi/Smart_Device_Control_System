@@ -5,10 +5,10 @@ import { createAndroidExecutor } from './executor';
 
 const SERIAL_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 
-function runAdb(args: string[], timeoutMs = 20000): Promise<{ stdout: string; stderr: string }> {
+export function runAdb(args: string[], timeoutMs = 20000): Promise<{ stdout: string; stderr: string }> {
   return new Promise((resolve, reject) => {
     execFile(
-      'adb',
+      process.env.ADB_PATH ?? 'adb',
       args,
       {
         encoding: 'utf8',
@@ -19,7 +19,7 @@ function runAdb(args: string[], timeoutMs = 20000): Promise<{ stdout: string; st
       },
       (error, stdout, stderr) => {
         if (error) {
-          reject(new Error(stderr.trim() || error.message));
+          reject(new Error(stderr.trim() || error.message, { cause: error }));
           return;
         }
         resolve({ stdout, stderr });
@@ -96,7 +96,7 @@ export async function captureAndroidScreenshot(serial: string): Promise<Buffer> 
 
   return new Promise((resolve, reject) => {
     execFile(
-      'adb',
+      process.env.ADB_PATH ?? 'adb',
       ['-s', serial, 'exec-out', 'screencap', '-p'],
       {
         encoding: 'buffer',
@@ -126,7 +126,7 @@ export async function executeAndroidAction(serial: string, action: Action): Prom
 
 const androidExecutor = createAndroidExecutor(runAdb);
 
-export async function preflightAndroidPlan(serial: string, actions: Action[]): Promise<void> {
+export async function preflightAndroidPlan(serial: string, actions: Action[], requiresAdbKeyboard = true): Promise<void> {
   if (!isValidAndroidSerial(serial)) throw new Error('Invalid device serial.');
-  await androidExecutor.preflight(serial, actions);
+  await androidExecutor.preflight(serial, actions, requiresAdbKeyboard);
 }
