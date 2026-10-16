@@ -1,10 +1,14 @@
-import { captureAndroidScreenshot, isValidAndroidSerial, listAndroidDevices } from '@/lib/android/adb';
+import { isValidAndroidSerial, listAndroidDevices } from '@/lib/android/adb';
+import { androidPreview } from '@/lib/android/screen-previews';
 
 export async function GET(
-  _request: Request,
+  request: Request,
   { params }: { params: Promise<{ serial: string }> }
 ) {
   const { serial } = await params;
+  const rawWidth = new URL(request.url).searchParams.get('width');
+  const width = rawWidth === null ? undefined : Number(rawWidth);
+  if (width !== undefined && (!Number.isInteger(width) || width < 160 || width > 720)) return Response.json({ error: 'Invalid preview width.' }, { status: 400 });
   if (!isValidAndroidSerial(serial)) {
     return Response.json({ success: false, error: 'Serial thiết bị không hợp lệ.' }, { status: 400 });
   }
@@ -18,11 +22,11 @@ export async function GET(
       );
     }
 
-    const screenshot = await captureAndroidScreenshot(serial);
+    const screenshot = await androidPreview(serial, width);
     return new Response(new Uint8Array(screenshot), {
       headers: {
         'Cache-Control': 'no-store, no-cache, must-revalidate',
-        'Content-Type': 'image/png',
+        'Content-Type': width ? 'image/jpeg' : 'image/png',
         'X-Content-Type-Options': 'nosniff',
       },
     });

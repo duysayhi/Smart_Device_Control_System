@@ -120,7 +120,7 @@ test('bounded backward refinement recovers ordinal overlap before counting the n
   const h = harness([state(['Alpha', 'Bravo']), state(['Bravo', 'Charlie']), state(['Charlie', 'Delta'])], { skipLarge: true });
   const result = await h.run('video_card_4', false);
   assert.equal(result.status, 'FOUND'); assert.equal(result.selection.title, 'Delta');
-  assert.deepEqual(h.gestures.map(g => [g.direction, g.percent]), [['up', .35], ['down', .6], ['up', .2], ['down', .2]]);
+  assert.deepEqual(h.gestures.map(g => [g.direction, g.percent]), [['up', .35], ['down', 340 / 600], ['up', .2], ['down', .2]]);
   assert.equal(result.metrics.newElements, 4);
 });
 test('horizontal video shelves are not counted as ordinary vertical-list results', () => {
@@ -179,7 +179,7 @@ test('empty video viewports use a larger bounded scroll then restore overlap scr
   const result = await h.run('video_card_3', false);
   assert.equal(result.status, 'FOUND');
   assert.equal(result.selection.title, 'Charlie');
-  assert.deepEqual(h.gestures.filter(g => g.direction === 'down').map(g => g.percent), [.9, .6]);
+  assert.deepEqual(h.gestures.filter(g => g.direction === 'down').map(g => g.percent), [.9, 340 / 600]);
   assert.equal(ExplorationConfigSchema.parse({ emptyVideoScrollPercent: .5 }).emptyVideoScrollPercent, .5);
   assert.equal(ExplorationConfigSchema.parse({ emptyVideoScrollPercent: .6 }).emptyVideoScrollPercent, .6);
   assert.equal(ExplorationConfigSchema.parse({ emptyVideoScrollPercent: .9 }).emptyVideoScrollPercent, .9);

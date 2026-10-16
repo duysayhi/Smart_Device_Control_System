@@ -7,6 +7,7 @@ import type { AdbRunner } from '../executor';
 import { AndroidExecutionError, checkCancellation } from '../errors';
 import { AppiumClient } from './client';
 import { withSessionContextLock } from './session-operation-lock';
+import { allocateSessionPorts, type PortLease } from './port-allocator';
 
 const activeDevices = new Set<string>();
 
@@ -75,13 +76,18 @@ export async function verifyInstalledAppiumServer(run: AdbRunner, serial: string
 export class ManagedAppiumSession {
   private id?: string;
   private creationUncertain = false;
+  private ports?: PortLease;
+  private opening = false;
   constructor(public readonly client: AppiumClient, public readonly serial: string, private readonly run: AdbRunner,
-    private readonly verifyServer = verifyInstalledAppiumServer) {}
+    private readonly verifyServer = verifyInstalledAppiumServer, private readonly allocatePorts = allocateSessionPorts) {}
   get path(): string {
     if (!this.id) throw new AndroidExecutionError('SESSION_ERROR', 'Appium session has not been created.');
     return `/session/${encodeURIComponent(this.id)}`;
   }
   async open(signal?: AbortSignal): Promise<void> {
+    if (this.opening || this.id || this.creationUncertain || this.ports) throw new AndroidExecutionError('SESSION_ERROR', 'This Session already owns resources or is being opened.');
+    this.opening = true;
+    try {
     checkCancellation(signal);
     const idleTimeout = Number(process.env.ANDROID_OBSERVER_IDLE_TIMEOUT_MS ?? 1000);
     if (!Number.isInteger(idleTimeout) || idleTimeout < 500 || idleTimeout > 10000) throw new AndroidExecutionError('CONFIG_ERROR', 'ANDROID_OBSERVER_IDLE_TIMEOUT_MS must be an integer between 500 and 10000.');
@@ -97,18 +103,22 @@ export class ManagedAppiumSession {
     }
     // Never auto-install or initialize APKs. Server skip is allowed only after version checks.
     // Creation is not aborted mid-flight: retain the resulting ID so cancellation can clean it up.
+    this.ports = await this.allocatePorts(this.serial);
     this.creationUncertain = true;
     let result: { sessionId: string };
     try {
       result = await this.client.request<{ sessionId: string }>('POST', '/session', { capabilities: {
       alwaysMatch: { platformName: 'Android', 'appium:automationName': 'UiAutomator2',
         'appium:deviceName': this.serial, 'appium:udid': this.serial, 'appium:noReset': true,
+        'appium:systemPort': this.ports.systemPort, 'appium:chromedriverPort': this.ports.chromedriverPort,
+        ...(process.env.APPIUM_ENABLE_MJPEG === 'true' ? { 'appium:mjpegServerPort': this.ports.mjpegServerPort } : {}),
         ...(chromedriver ? { 'appium:chromedriverExecutable': chromedriver } : {}),
         'appium:chromeOptions': { androidUseRunningApp: true, androidDeviceSerial: this.serial },
         'appium:fullReset': false, 'appium:skipServerInstallation': true, 'appium:skipDeviceInitialization': true,
         'appium:skipUnlock': true, 'appium:autoLaunch': false, 'appium:skipLogcatCapture': true,
         'appium:adbExecTimeout': 20000, 'appium:uiautomator2ServerInstallTimeout': 120000,
-        'appium:uiautomator2ServerLaunchTimeout': 30000, 'appium:newCommandTimeout': 90,
+        // Keep the Session alive through the 120-second human evidence window and revalidation.
+        'appium:uiautomator2ServerLaunchTimeout': 30000, 'appium:newCommandTimeout': 180,
       }, firstMatch: [{}],
     } }, 120000);
     } catch (error) {
@@ -124,6 +134,7 @@ export class ManagedAppiumSession {
     // Animated feeds may never become idle. Keep a bounded session-only idle wait;
     // observer conditions and fresh native validation still decide when an action is safe.
     await this.client.request('POST', this.path + '/appium/settings', { settings: { waitForIdleTimeout: idleTimeout } }, 10000, signal);
+    } finally { this.opening = false; }
   }
   async ensureActive(signal?: AbortSignal): Promise<void> {
     await assertDeviceConnected(this.run, this.serial);
@@ -136,11 +147,12 @@ export class ManagedAppiumSession {
   }
   private async closeWithinContextLock(): Promise<void> {
     if (this.creationUncertain) throw new AndroidExecutionError('SESSION_ERROR', 'Session creation outcome is uncertain; retain device lock and inspect Appium before retrying.');
-    if (!this.id) return;
+    if (!this.id) { await this.ports?.release(); this.ports = undefined; return; }
     try { await this.client.request('DELETE', this.path, undefined, 30000); this.id = undefined; }
     catch (error) {
-      if (error instanceof AndroidExecutionError && error.sessionInvalid) { this.id = undefined; return; }
-      throw error;
+      if (error instanceof AndroidExecutionError && error.sessionInvalid) { this.id = undefined; }
+      else throw error;
     }
+    await this.ports?.release(); this.ports = undefined;
   }
 }

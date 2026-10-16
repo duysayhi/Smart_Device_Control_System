@@ -4,6 +4,8 @@
   "private": true,
   "scripts": {
     "dev": "next dev",
+    "agent:worker": "node scripts/agent-worker.cjs",
+    "agent:worker:stop": "node scripts/agent-worker.cjs --stop",
     "build": "next build",
     "start": "next start",
     "lint": "eslint"

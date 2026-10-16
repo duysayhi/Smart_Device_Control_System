@@ -8,8 +8,7 @@ import {
   Workflow, 
   ListOrdered, 
   History, 
-  Settings,
-  CircleDot
+  Settings
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
@@ -23,7 +22,7 @@ interface NavItem {
 
 const NAV_ITEMS: NavItem[] = [
   { id: 'dashboard', label: 'Tổng quan', icon: LayoutDashboard, active: true },
-  { id: 'devices', label: 'Thiết bị', icon: Smartphone, badge: '6' },
+  { id: 'devices', label: 'Thiết bị', icon: Smartphone },
   { id: 'ai-commands', label: 'Lệnh AI', icon: Sparkles },
   { id: 'workflows', label: 'Kịch bản', icon: Workflow },
   { id: 'task-queue', label: 'Hàng đợi', icon: ListOrdered },
@@ -116,17 +115,6 @@ export const AppSidebar: React.FC<AppSidebarProps> = ({
           </span>
         </div>
         
-        <div className="flex items-center gap-2 text-xs text-slate-600 font-medium">
-          <span className="relative flex h-2.5 w-2.5">
-            <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
-            <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-emerald-500"></span>
-          </span>
-          <span>ADB / Appium: Sẵn sàng</span>
-        </div>
-        <div className="mt-2 text-[10px] text-slate-400 flex items-center gap-1">
-          <CircleDot className="w-3 h-3 text-slate-400" />
-          <span>Socket.IO: Giả lập kết nối</span>
-        </div>
       </div>
     </aside>
   );

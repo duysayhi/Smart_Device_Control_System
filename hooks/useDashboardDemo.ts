@@ -4,12 +4,13 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { ActionPlan, LogEntry, PlanStatus } from '@/types/command';
 import { AndroidAdbDevice, Device } from '@/types/device';
 import { ExecutionStepResult, ExecutionStreamEvent, TaskQueueItem } from '@/types/execution';
-import { INITIAL_DEVICES, INITIAL_LOGS, INITIAL_TASKS, SAMPLE_COMMANDS } from '@/lib/mock-data';
+import { SAMPLE_COMMANDS } from '@/lib/mock-data';
+import { resolveLiveDeviceSelection } from '@/lib/android/device-selection';
 import { ActionPlanSchema } from '@/lib/validators/action-plan.schema';
 
 export function useDashboardDemo() {
-  const [devices, setDevices] = useState<Device[]>(INITIAL_DEVICES);
-  const [selectedDeviceIds, setSelectedDeviceIds] = useState<string[]>(['dev-001', 'dev-003']);
+  const [devices, setDevices] = useState<Device[]>([]);
+  const [selectedDeviceIds, setSelectedDeviceIds] = useState<string[]>([]);
   const [androidDevices, setAndroidDevices] = useState<AndroidAdbDevice[]>([]);
   const [selectedAndroidSerial, setSelectedAndroidSerial] = useState('');
   const [androidDevicesLoading, setAndroidDevicesLoading] = useState(false);
@@ -21,12 +22,13 @@ export function useDashboardDemo() {
   const [executionSteps, setExecutionSteps] = useState<ExecutionStepResult[]>([]);
   const [executionStatus, setExecutionStatus] = useState<'IDLE' | 'RUNNING' | 'SUCCESS' | 'FAILED' | 'SENT'>('IDLE');
   const [executionError, setExecutionError] = useState<string | null>(null);
-  const [logs, setLogs] = useState<LogEntry[]>(INITIAL_LOGS);
+  const [logs, setLogs] = useState<LogEntry[]>([]);
   const [isExecuting, setIsExecuting] = useState(false);
-  const [tasks] = useState<TaskQueueItem[]>(INITIAL_TASKS);
+  const [tasks] = useState<TaskQueueItem[]>([]);
   const [searchQuery, setSearchQuery] = useState('');
   const analysisRequestIdRef = useRef(0);
   const selectedAndroidSerialRef = useRef('');
+  const selectedIdsRef = useRef<string[] | undefined>(undefined);
   const executionAbortControllerRef = useRef<AbortController | null>(null);
 
   const refreshAndroidDevices = useCallback(async () => {
@@ -44,44 +46,18 @@ export function useDashboardDemo() {
       }
 
       setAndroidDevices(payload.devices);
-      const liveDevices: Device[] = payload.devices.map((device) => ({
-        id: device.serial,
-        serial: device.serial,
-        name: device.model,
-        platform: 'android',
-        osVersion: device.osVersion || 'Không có dữ liệu',
-        status: device.status === 'device'
-          ? 'READY'
-          : device.status === 'offline'
-            ? 'OFFLINE'
-            : device.status === 'unauthorized' ? 'UNAUTHORIZED' : 'ERROR',
-        batteryLevel: device.batteryLevel,
-        connectionType: device.connectionType,
-        resolution: device.resolution || 'Không có dữ liệu',
-        screenPreview: 'home',
-        ipAddress: device.ipAddress,
-        screenshotUrl: device.screenshotUrl,
-        isLive: true,
-        lastActive: 'Đang kết nối ADB',
-      }));
-      setDevices([...INITIAL_DEVICES, ...liveDevices]);
-
-      const retained = payload.devices.find((device) =>
-        device.serial === selectedAndroidSerialRef.current &&
-        device.status === 'device' &&
-        device.connectionType === 'USB'
-      );
-      const nextSerial = retained?.serial ?? payload.devices.find((device) =>
-        device.status === 'device' && device.connectionType === 'USB'
-      )?.serial ?? '';
-      selectedAndroidSerialRef.current = nextSerial;
-      setSelectedAndroidSerial(nextSerial);
-      setSelectedDeviceIds(nextSerial ? [nextSerial] : []);
+      const liveSelection = resolveLiveDeviceSelection(payload.devices, selectedAndroidSerialRef.current, selectedIdsRef.current);
+      setDevices(liveSelection.devices);
+      selectedAndroidSerialRef.current = liveSelection.selectedAndroidSerial;
+      setSelectedAndroidSerial(liveSelection.selectedAndroidSerial);
+      setSelectedDeviceIds(liveSelection.selectedDeviceIds);
+      selectedIdsRef.current = liveSelection.selectedDeviceIds;
     } catch (error) {
       setAndroidDevices([]);
       selectedAndroidSerialRef.current = '';
       setSelectedAndroidSerial('');
-      setDevices(INITIAL_DEVICES);
+      setDevices([]);
+      setSelectedDeviceIds([]);
       setAndroidDevicesError(error instanceof Error ? error.message : 'Không thể tải danh sách thiết bị Android.');
     } finally {
       setAndroidDevicesLoading(false);
@@ -105,10 +81,13 @@ export function useDashboardDemo() {
   const handleSelectToggle = useCallback((deviceId: string) => {
     const liveDevice = devices.find((device) => device.id === deviceId && device.isLive);
     if (liveDevice) {
-      const nextSerial = selectedAndroidSerialRef.current === deviceId ? '' : deviceId;
+      const previous = selectedIdsRef.current ?? [];
+      const selected = previous.includes(deviceId) ? previous.filter(id => id !== deviceId) : [...previous, deviceId];
+      selectedIdsRef.current = selected;
+      const nextSerial = selected.includes(deviceId) ? deviceId : selected[0] ?? '';
       selectedAndroidSerialRef.current = nextSerial;
       setSelectedAndroidSerial(nextSerial);
-      setSelectedDeviceIds(nextSerial ? [nextSerial] : []);
+      setSelectedDeviceIds(selected);
       return;
     }
 
@@ -122,19 +101,23 @@ export function useDashboardDemo() {
   }, [devices]);
 
   const handleSelectAll = useCallback((deviceIds: string[]) => {
-    const liveDevice = devices.find((device) => device.isLive && deviceIds.includes(device.id));
+    const liveDevice = devices.find((device) => device.isLive && device.status === 'READY' && device.connectionType === 'USB' && deviceIds.includes(device.id));
     if (liveDevice) {
       selectedAndroidSerialRef.current = liveDevice.serial;
-      setSelectedDeviceIds([liveDevice.id]);
+      const selected = devices.filter(device => device.isLive && device.status === 'READY' && device.connectionType === 'USB' && deviceIds.includes(device.id)).map(device => device.id);
+      selectedIdsRef.current = selected;
+      setSelectedDeviceIds(selected);
       setSelectedAndroidSerial(liveDevice.serial);
       return;
     }
     selectedAndroidSerialRef.current = '';
     setSelectedAndroidSerial('');
-    setSelectedDeviceIds(deviceIds);
+    selectedIdsRef.current = [];
+    setSelectedDeviceIds([]);
   }, [devices]);
 
   const handleClearSelection = useCallback(() => {
+    selectedIdsRef.current = [];
     setSelectedDeviceIds([]);
     selectedAndroidSerialRef.current = '';
     setSelectedAndroidSerial('');
@@ -143,7 +126,6 @@ export function useDashboardDemo() {
   const handleAndroidDeviceChange = useCallback((serial: string) => {
     selectedAndroidSerialRef.current = serial;
     setSelectedAndroidSerial(serial);
-    setSelectedDeviceIds(serial ? [serial] : []);
   }, []);
 
   const handleAnalyzeCommand = useCallback(async () => {
@@ -258,10 +240,12 @@ export function useDashboardDemo() {
             const key = `${step.status}:${step.phase}:${step.waitingFor}:${step.errorCode}:${step.exploration?.phase}:${step.exploration?.scrollCount}:${step.exploration?.status}`;
             if (step.status === 'PENDING' || loggedStates.get(step.index) === key) continue;
             loggedStates.set(step.index, key);
-            confirmedLogs.push({ id: `step-${Date.now()}-${step.index}`, timestamp: new Date().toTimeString().split(' ')[0],
+            confirmedLogs.push({
+              id: `step-${Date.now()}-${step.index}`, timestamp: new Date().toTimeString().split(' ')[0],
               deviceId: targetDevice.serial, deviceName: targetDevice.model,
               message: `${step.action.type}: ${step.errorCode ?? step.exploration?.phase ?? step.phase ?? step.status}${step.waitingFor ? ` (${step.waitingFor})` : ''}${step.exploration ? ` - cuộn ${step.exploration.scrollCount}, snapshot ${step.exploration.snapshotCount}, mới ${step.exploration.newElements}, trùng ${step.exploration.duplicateElements}` : ''}${step.postcondition ? ` - ${step.postcondition}` : ''}`,
-              status: step.status === 'FAILED' ? 'FAILED' : step.status === 'SUCCESS' ? 'SUCCESS' : step.status === 'SENT' ? 'INFO' : 'EXECUTING' });
+              status: step.status === 'FAILED' ? 'FAILED' : step.status === 'SUCCESS' ? 'SUCCESS' : step.status === 'SENT' ? 'INFO' : 'EXECUTING'
+            });
           }
           if (confirmedLogs.length) setLogs((previous) => [...confirmedLogs.reverse(), ...previous].slice(0, 500));
         }
@@ -300,9 +284,11 @@ export function useDashboardDemo() {
       setExecutionError(message);
       setExecutionStatus('FAILED');
       setExecutionSteps((previous) => previous.map((step) =>
-        step.status === 'EXECUTING' ? { ...step, status: 'FAILED', phase: undefined, error: message,
+        step.status === 'EXECUTING' ? {
+          ...step, status: 'FAILED', phase: undefined, error: message,
           errorCode: cancelled ? 'CANCELLED' : step.errorCode,
-          exploration: step.exploration ? { ...step.exploration, phase: 'NOT_FOUND', status: cancelled ? 'CANCELLED' : step.exploration.status, reason: message } : undefined } : step
+          exploration: step.exploration ? { ...step.exploration, phase: 'NOT_FOUND', status: cancelled ? 'CANCELLED' : step.exploration.status, reason: message } : undefined
+        } : step
       ));
       const timestamp = new Date().toTimeString().split(' ')[0];
       setLogs((previous) => [{

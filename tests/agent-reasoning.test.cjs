@@ -73,7 +73,7 @@ test('BACK requires a proven reversible layer, not a guessed unknown screen', as
   assert.throws(() => policyForAgentAction(goal, { type: 'PRESS_KEY', key: 'BACK' }, changed));
 });
 test('UI change while model reasons discards the action and cannot dispatch against stale state', async () => {
-  const budget = new AgentBudget(), { goal } = await planGoal('Mở Chrome, tìm phở và mở kết quả đầu tiên.', budget);
+  const budget = new AgentBudget({ recoverySubtasks: 0 }), { goal } = await planGoal('Mở Chrome, tìm phở và mở kết quả đầu tiên.', budget);
   let reads = 0, decisions = 0, actions = 0, closed = 0;
   const execution = { backend: 'appium', async observe() { budget.consume('snapshots'); return ++reads === 1 ? state(overview) : state(['url_bar']); },
     discoveryMemory() { return {}; }, async execute() { actions++; }, async close() { closed++; } };
@@ -83,7 +83,7 @@ test('UI change while model reasons discards the action and cannot dispatch agai
   assert.equal(actions, 0); assert.equal(closed, 1); assert.equal(out.result.status, 'FAILED'); assert.equal(decisions, 2);
 });
 test('BACK is verified only when an observed layer disappears and a valid search control returns', async () => {
-  const budget = new AgentBudget(), { goal } = await planGoal('Mở Chrome, tìm phở và mở kết quả đầu tiên.', budget);
+  const budget = new AgentBudget({ recoverySubtasks: 0 }), { goal } = await planGoal('Mở Chrome, tìm phở và mở kết quả đầu tiên.', budget);
   let reads = 0, decisions = 0;
   const execution = { backend: 'appium', async observe() { return ++reads === 1 ? state(overview) : state(['url_bar']); }, discoveryMemory() { return {}; },
     async execute() { return { verification: 'DISPATCHED', elapsedMs: 1 }; }, async close() {} };

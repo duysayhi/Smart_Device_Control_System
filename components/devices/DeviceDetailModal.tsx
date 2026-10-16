@@ -8,25 +8,21 @@ import {
   ChevronUp, 
   ChevronDown, 
   Camera, 
-  Type, 
-  RotateCw, 
-  Power,
-  Volume2,
-  VolumeX,
-  Battery,
-  Wifi,
-  Usb,
+  Type,
   Smartphone
 } from 'lucide-react';
 import { Device } from '@/types/device';
 import { DeviceScreen } from './DeviceScreen';
 import { DeviceStatusBadge } from './DeviceStatusBadge';
+import type { DeviceTask } from '@/lib/android/agent/runtime-schema';
+import { RecoveryProgressView } from '../commands/AgentGoalPanel';
 
 interface DeviceDetailModalProps {
   device: Device | null;
   isOpen: boolean;
   onClose: () => void;
   onSimulateAction?: (deviceId: string, actionName: string) => void;
+  task?: DeviceTask;
 }
 
 export const DeviceDetailModal: React.FC<DeviceDetailModalProps> = ({
@@ -34,6 +30,7 @@ export const DeviceDetailModal: React.FC<DeviceDetailModalProps> = ({
   isOpen,
   onClose,
   onSimulateAction,
+  task,
 }) => {
   const [inputText, setInputText] = React.useState('');
   const [feedbackMessage, setFeedbackMessage] = React.useState<string | null>(null);
@@ -106,6 +103,11 @@ export const DeviceDetailModal: React.FC<DeviceDetailModalProps> = ({
 
           {/* Right: Manual Control Toolbar & Device Diagnostics */}
           <div className="md:col-span-7 flex flex-col gap-5">
+            {task && <div className="border-b border-slate-200 pb-3 text-xs space-y-2 break-words" aria-label="Agent thiết bị">
+              <strong>{task.deviceId} · {task.status}</strong><p>{task.request}</p><p>{task.latest?.reason}</p>
+              <p>{task.latest?.verifiedSubgoals ?? 0}/{task.latest?.totalSubgoals ?? 0} mục tiêu con</p>
+              {task.latest?.recovery && <RecoveryProgressView recovery={task.latest.recovery} />}
+            </div>}
             {feedbackMessage && (
               <div className="px-3 py-2 bg-indigo-50 border border-indigo-200 rounded-lg text-xs font-semibold text-indigo-700 animate-fade-in flex items-center gap-2">
                 <span className="w-2 h-2 rounded-full bg-indigo-600 animate-ping"></span>
@@ -114,7 +116,7 @@ export const DeviceDetailModal: React.FC<DeviceDetailModalProps> = ({
             )}
 
             {/* Hardware Controls */}
-            <div className="bg-slate-50 rounded-xl p-4 border border-slate-200">
+            <fieldset disabled={device.isLive} className="bg-slate-50 rounded-xl p-4 border border-slate-200 disabled:opacity-50">
               <h4 className="text-xs font-bold text-slate-700 uppercase tracking-wider mb-3">
                 Thao tác phím điều hướng hệ thống
               </h4>
@@ -159,10 +161,10 @@ export const DeviceDetailModal: React.FC<DeviceDetailModalProps> = ({
                   <span>Vuốt xuống (Scroll Down)</span>
                 </button>
               </div>
-            </div>
+            </fieldset>
 
             {/* Text Input Simulation */}
-            <div className="bg-slate-50 rounded-xl p-4 border border-slate-200">
+            <fieldset disabled={device.isLive} className="bg-slate-50 rounded-xl p-4 border border-slate-200 disabled:opacity-50">
               <h4 className="text-xs font-bold text-slate-700 uppercase tracking-wider mb-2 flex items-center gap-1.5">
                 <Type className="w-4 h-4 text-indigo-600" />
                 <span>Nhập văn bản từ xa (Remote Text Input)</span>
@@ -182,7 +184,7 @@ export const DeviceDetailModal: React.FC<DeviceDetailModalProps> = ({
                   Gửi vào máy
                 </button>
               </form>
-            </div>
+            </fieldset>
 
             {/* Device Diagnostic Details */}
             <div className="border border-slate-200 rounded-xl p-4 bg-white space-y-2">
@@ -205,7 +207,7 @@ export const DeviceDetailModal: React.FC<DeviceDetailModalProps> = ({
         {/* Modal Footer */}
         <div className="px-6 py-3.5 border-t border-slate-200 bg-slate-50/70 flex items-center justify-between">
           <div className="text-xs text-slate-500">
-            Sẵn sàng tích hợp luồng H.264/WebRTC khi cắm thiết bị thật.
+            {device.serial}
           </div>
           <button
             onClick={onClose}

@@ -58,6 +58,13 @@ export function matchUiTarget(snapshot: Observation, target: string, forClick = 
   } else if (target.startsWith('element:')) {
     const selected = nodeForSelection(snapshot, { snapshotId: snapshot.snapshotId, elementId: target.slice(8) });
     candidates = selected ? [selected] : [];
+  } else if (target.startsWith('observed:')) {
+    // A conjunction of attributes read from this UI, not a model-authored selector.
+    const schema = z.object({ resourceId: z.string().min(1).max(200), text: z.string().min(1).max(150), className: z.string().min(1).max(200) }).strict();
+    try {
+      const parsed = schema.safeParse(JSON.parse(target.slice(9)));
+      if (parsed.success) candidates = nodes.filter(n => n.resourceId === parsed.data.resourceId && n.text === parsed.data.text && n.className === parsed.data.className);
+    } catch { return { status: 'MISSING' }; }
   } else {
     // Registry optimizes proven selectors; other apps still use evidence from their own snapshot.
     const registry = findUiTarget(nodes, target);

@@ -4,7 +4,7 @@ import { CandidateGroundingSchema } from './action-candidates';
 
 export const GoalSpecSchema = z.object({
   app: z.string().trim().min(1).max(150),
-  operation: z.enum(['OPEN_APP', 'FIND_ELEMENT', 'SEARCH', 'OPEN_RESULT']),
+  operation: z.enum(['OPEN_APP', 'FIND_ELEMENT', 'FIND_PLACE', 'SEARCH', 'OPEN_RESULT', 'OPEN_PAGE']),
   query: z.string().trim().min(1).max(300).optional(),
   targetText: z.string().trim().min(1).max(150).optional(),
   resultType: z.enum(['video', 'browser']).optional(),
@@ -16,6 +16,8 @@ export const CriterionSchema = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('FOREGROUND'), packageName: z.string().min(1) }).strict(),
   z.object({ kind: z.literal('SEARCH_RESULTS'), query: z.string().min(1) }).strict(),
   z.object({ kind: z.literal('TARGET_VISIBLE'), target: z.string().min(1) }).strict(),
+  z.object({ kind: z.literal('READ_LOCATION'), target: z.string().min(1) }).strict(),
+  z.object({ kind: z.literal('NATIVE_PAGE'), target: z.string().min(1) }).strict(),
   z.object({ kind: z.literal('DESTINATION'), resultType: z.enum(['video', 'browser']), ordinal: z.number().int().min(1).max(99), target: z.string().min(1) }).strict(),
 ]);
 export type Criterion = z.infer<typeof CriterionSchema>;
@@ -28,6 +30,10 @@ export const AgentLimitsSchema = z.object({
   retries: z.number().int().min(0).max(3).default(2),
   replans: z.number().int().min(0).max(4).default(2),
   iterations: z.number().int().min(1).max(80).default(40),
+  recoveryDepth: z.number().int().min(1).max(2).default(2),
+  recoverySubtasks: z.number().int().min(0).max(3).default(3),
+  recoveryAttempts: z.number().int().min(1).max(3).default(2),
+  recoveryTimeMs: z.number().int().min(500).max(30000).default(15000),
 }).strict();
 export type AgentLimits = z.infer<typeof AgentLimitsSchema>;
 export const GoalSchema = z.object({
@@ -62,6 +68,11 @@ export interface AgentProgress {
   reasoningMeasurements?: import('./budget').ReasoningMeasurement[];
   snapshotSources?: Record<string, number>;
   webVerification?: import('./budget').AgentBudget['webVerification'];
-  assistance?: { category: 'INTERACTION_POSITION' | 'SENSITIVE_ACTION' | 'UNKNOWN_UI'; resumable: false; sessionRetained: false; expiresAt: number; evidenceId?: string };
+  assistance?: { category: 'INTERACTION_POSITION' | 'SENSITIVE_ACTION' | 'UNKNOWN_UI'; resumable: boolean; sessionRetained: boolean; expiresAt: number; evidenceId?: string; token?: string };
+  resultEvidence?: { label: string; value: string; packageName: string; snapshotId: string; basis?: { used: string; total: string; derived: true } };
+  destinationEvidence?: { title: string; ordinal: number; url?: string; snapshotId: string };
+  cancellationToken?: string;
+  failure?: { code: string; message: string };
   visual?: import('../visual-grounding').VisualSummary;
+  recovery?: import('./recovery').RecoveryProgress;
 }

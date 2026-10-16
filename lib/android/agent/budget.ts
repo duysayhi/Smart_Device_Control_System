@@ -1,4 +1,5 @@
 import { AgentLimitsSchema, type AgentLimits } from './schema';
+import { randomUUID } from 'node:crypto';
 
 export class AgentLimitError extends Error {}
 export interface ReasoningMeasurement {
@@ -6,13 +7,15 @@ export interface ReasoningMeasurement {
   outputTokens?: number; evalMs?: number; status: 'VALID' | 'TIMEOUT' | 'HTTP_ERROR' | 'INVALID_JSON' | 'UNAVAILABLE' | 'CANCELLED';
 }
 export class AgentBudget {
+  readonly queueOwner = randomUUID();
+  runtimeIdentity?: { executionId: string; deviceId: string };
   readonly reasoningMeasurements: ReasoningMeasurement[] = [];
   readonly snapshotSources: Record<string, number> = {};
   readonly webVerification: { phase: string; urlMatches?: boolean; titleMatches?: boolean; ready?: boolean; pageError?: boolean; changed?: boolean }[] = [];
   readonly limits: AgentLimits;
   readonly started = performance.now();
-  readonly counters = { steps: 0, snapshots: 0, scrolls: 0, reasoning: 0, retries: 0, replans: 0, iterations: 0 };
-  readonly timings = { observationMs: 0, reasoningMs: 0, executionMs: 0, verificationMs: 0, totalMs: 0 };
+  readonly counters = { steps: 0, snapshots: 0, scrolls: 0, reasoning: 0, retries: 0, replans: 0, iterations: 0, recoverySubtasks: 0 };
+  readonly timings = { planningMs: 0, sessionSetupMs: 0, assistanceMs: 0, recoveryMs: 0, observationMs: 0, reasoningMs: 0, executionMs: 0, verificationMs: 0, totalMs: 0 };
   constructor(limits: Partial<AgentLimits> = {}) { this.limits = AgentLimitsSchema.parse(limits); }
   remaining(): number { return Math.max(0, this.limits.timeMs - (performance.now() - this.started)); }
   check(): void { if (!this.remaining()) throw new AgentLimitError('Goal time budget exhausted.'); }

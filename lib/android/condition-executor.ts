@@ -31,6 +31,9 @@ export interface ExecutionAccounting {
   onVerifiedSnapshot?: (snapshot: Observation) => void;
   beforeKey?: (action: Extract<Action, { type: 'PRESS_KEY' }>, snapshot: Observation) => void;
   verifyNavigation?: (before: Observation, after: Observation) => boolean;
+  beforeAction?: (action: Action, snapshot: Observation) => void;
+  verifyAction?: (action: Action, before: Observation, after: Observation) => boolean | undefined;
+  allowedPackage?: (packageName: string) => boolean;
 }
 
 export function assertNonSensitivePlan(plan: ActionPlan): void {
@@ -66,8 +69,9 @@ export class ConditionExecutor {
       }
       const after = await this.observer.waitUntil(s => verifyDiscoveredSelection(result.selection, result.before, s) ? s : false,
         'human-confirmed selected destination', 30000, signal);
+      this.accounting?.onVerifiedSnapshot?.(after);
       this.explorer.reset();
-      return { verification: 'VERIFIED', elapsedMs: Math.round(performance.now() - started), evidence: observationEvidence(after),
+      return { selection: result.selection, verification: 'VERIFIED', elapsedMs: Math.round(performance.now() - started), evidence: observationEvidence(after),
         postcondition: 'Human-confirmed grounded tap and selected destination verified',
         preconditions: ['independent policy ALLOW', 'single-use confirmation', 'same native hierarchy and screen pixels', 'uncovered measured point'],
         interaction: { method: 'HUMAN_CONFIRMED_GROUNDED_TAP', resourceId: '', className: '', bounds: [result.point.x, result.point.y], evidence: [choice.evidenceId, result.decision] } };
@@ -176,7 +180,7 @@ export class ConditionExecutor {
         const result = await discover(action.target, explorationConfig().timeoutMs, true);
         let found = result.found!;
         selection = result.selection;
-        if (this.expectedPackage && found.snapshot.foregroundPackage !== this.expectedPackage) throw new AndroidExecutionError('UNKNOWN', 'Foreground app changed before interaction.');
+        if (this.expectedPackage && found.snapshot.foregroundPackage !== this.expectedPackage && !this.accounting?.allowedPackage?.(found.snapshot.foregroundPackage)) throw new AndroidExecutionError('UNKNOWN', 'Foreground app changed before interaction.');
         assertObservedControlSafe(found.node);
         if (found.owner) assertObservedControlSafe(found.owner);
         preconditions.push('unique native element', 'visible and enabled', 'clickable element or validated clickable owner', 'activation point within viewport and not covered by another control');
@@ -188,13 +192,15 @@ export class ConditionExecutor {
           assertObservedControlSafe(found.node);
           if (found.owner) assertObservedControlSafe(found.owner);
         }
+        this.accounting?.beforeAction?.(action, found.snapshot);
         if (found.interaction?.method === 'LABEL_GESTURE') {
           if (!found.interaction.point) throw new AndroidExecutionError('AMBIGUOUS', 'Native label bounds did not provide an activation point.');
           await this.session.client.request('POST', this.session.path + '/execute/sync', { script: 'mobile: clickGesture', args: [found.interaction.point] }, 15000, signal);
         } else await this.session.client.request('POST', this.session.path + `/element/${encodeURIComponent(found.id)}/click`, {}, 15000, signal);
         interaction = { method: found.interaction?.method ?? 'ELEMENT_CLICK', resourceId: found.node.resourceId, className: found.node.className,
           bounds: [...found.node.bounds], evidence: found.interaction?.evidence ?? ['unique observed native element'] };
-        const verify = (state: Observation) => result.selection ? verifyDiscoveredSelection(result.selection, found.snapshot, state) : verifyClickTransition(found.snapshot, state, action.target);
+        const verify = (state: Observation) => this.accounting?.verifyAction?.(action, found.snapshot, state) ??
+          (result.selection ? verifyDiscoveredSelection(result.selection, found.snapshot, state) : verifyClickTransition(found.snapshot, state, action.target));
         if (verify(found.snapshot) !== undefined) {
           const verifyStarted = performance.now() - start;
           const verifyBudget = result.selection ? Math.max(1, explorationConfig().timeoutMs - verifyStarted) : 20000;
@@ -225,7 +231,7 @@ export class ConditionExecutor {
       case 'INPUT_TEXT': {
         snapshot = await wait((state) => state.nodes.filter((node) => node.packageName === state.foregroundPackage && node.enabled && node.displayed !== false && node.focused && /EditText|AutoCompleteTextView/.test(node.className)).length === 1 ? state : false, 'focused EditText');
         const input = snapshot.nodes.find((node) => node.packageName === snapshot!.foregroundPackage && node.enabled && node.displayed !== false && node.focused && /EditText|AutoCompleteTextView/.test(node.className))!;
-        if (this.expectedPackage && snapshot.foregroundPackage !== this.expectedPackage) throw new AndroidExecutionError('UNKNOWN', 'Foreground app changed before input. No text was entered.');
+        if (this.expectedPackage && snapshot.foregroundPackage !== this.expectedPackage && !this.accounting?.allowedPackage?.(snapshot.foregroundPackage)) throw new AndroidExecutionError('UNKNOWN', 'Foreground app changed before input. No text was entered.');
         if (snapshot.foregroundPackage === 'com.android.chrome' && unsafeBrowserInput(action.text)) throw new AndroidExecutionError('CONFIG_ERROR', 'Executable/custom URL schemes or sensitive URL actions are not allowed. No text was entered.');
         if (!input.resourceId) throw new AndroidExecutionError('UNKNOWN', 'Focused input has no validated resource ID.');
         const found = await this.observer.locate(snapshot, `id:${input.resourceId}`, false, 10000, signal);
@@ -236,6 +242,7 @@ export class ConditionExecutor {
         const password = await this.session.client.request<string>('GET', path + '/attribute/password', undefined, 10000, signal);
         if (password !== 'false') throw new AndroidExecutionError('CONFIG_ERROR', 'Input is a password field or its safety is unknown; no text was entered.');
         preconditions.push('unique enabled focused non-password EditText');
+        this.accounting?.beforeAction?.(action, snapshot);
         await this.session.client.request('POST', path + '/clear', {}, 15000, signal);
         await this.session.client.request('POST', path + '/value', { text: action.text }, 15000, signal);
         snapshot = await wait((state) => state.foregroundPackage === input.packageName && state.nodes.some((node) => node.packageName === input.packageName && node.resourceId === input.resourceId && node.enabled && node.displayed !== false && node.focused && node.text === action.text) ? state : false, 'input text verified');
@@ -278,14 +285,17 @@ export class ConditionExecutor {
       }
       case 'SWIPE': {
         const before = await this.observer.read(15000, signal);
-        if (this.expectedPackage && before.foregroundPackage !== this.expectedPackage) throw new AndroidExecutionError('UNKNOWN', 'Foreground app changed before scrolling.');
+        this.accounting?.beforeAction?.(action, before);
+        if (this.expectedPackage && before.foregroundPackage !== this.expectedPackage && !this.accounting?.allowedPackage?.(before.foregroundPackage)) throw new AndroidExecutionError('UNKNOWN', 'Foreground app changed before scrolling.');
         // Preserve SWIPE's finger direction; scrollGesture describes content traversal direction.
         const direction = ({ up: 'down', down: 'up', left: 'right', right: 'left' } as const)[action.direction];
         const region = detectScrollRegion(before, explorationGoal('scroll content'), direction);
         if (region.status !== 'FOUND') throw new AndroidExecutionError(region.status, region.reason);
         await this.scrollController.scroll(before, region.region, direction, explorationConfig().scrollPercent, 15000, signal, explorationConfig().scrollSpeed);
         this.explorer.reset();
-        snapshot = await this.observer.read(15000, signal);
+        snapshot = this.accounting?.verifyAction?.(action, before, before) !== undefined
+          ? await wait(state => this.accounting!.verifyAction!(action, before, state) ? state : false, 'grounded scroll changed content', 10000)
+          : await this.observer.read(15000, signal);
         verification = uiFingerprint(before) !== uiFingerprint(snapshot) ? 'VERIFIED' : 'DISPATCHED';
         postcondition = verification === 'VERIFIED' ? 'Scroll changed visible UI' : 'Scroll sent; no UI change verified';
         break;

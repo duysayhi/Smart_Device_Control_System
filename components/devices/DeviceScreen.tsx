@@ -1,6 +1,7 @@
 'use client';
 
 import React from 'react';
+import Image from 'next/image';
 import { 
   Wifi, 
   Battery, 
@@ -11,13 +12,10 @@ import {
   Compass, 
   Navigation, 
   Settings, 
-  Play, 
-  Bell,
-  Volume2,
-  Lock,
+  Play,
   WifiOff
 } from 'lucide-react';
-import { Device, ScreenAppType } from '@/types/device';
+import { Device } from '@/types/device';
 import { cn } from '@/lib/utils';
 
 interface DeviceScreenProps {
@@ -33,13 +31,10 @@ export const DeviceScreen: React.FC<DeviceScreenProps> = ({
   onTap,
   className
 }) => {
-  const [screenshotFailed, setScreenshotFailed] = React.useState(false);
+  const [failedUrl, setFailedUrl] = React.useState<string>();
+  const screenshotFailed = Boolean(device.screenshotUrl && failedUrl === device.screenshotUrl);
   const isOffline = device.status === 'OFFLINE' || device.status === 'UNAUTHORIZED';
   const isExecuting = device.status === 'EXECUTING';
-
-  React.useEffect(() => {
-    setScreenshotFailed(false);
-  }, [device.screenshotUrl]);
 
   return (
     <div 
@@ -82,11 +77,12 @@ export const DeviceScreen: React.FC<DeviceScreenProps> = ({
         {/* Main Display Body (Simulating App UI) */}
         <div className="flex-1 relative overflow-hidden flex flex-col bg-slate-900">
           {device.screenshotUrl && !screenshotFailed ? (
-            <img
+            <Image
               src={device.screenshotUrl}
               alt={`Màn hình thật của ${device.name}`}
+              fill unoptimized sizes="260px"
               className="absolute inset-0 h-full w-full object-contain bg-black"
-              onError={() => setScreenshotFailed(true)}
+              onError={() => setFailedUrl(device.screenshotUrl)}
             />
           ) : device.isLive ? (
             <div className="flex flex-1 items-center justify-center p-3 text-center text-[10px] text-slate-400">
@@ -95,7 +91,7 @@ export const DeviceScreen: React.FC<DeviceScreenProps> = ({
           ) : renderAppContent(device)}
 
           {/* Executing Overlay Indicator */}
-          {isExecuting && (
+          {isExecuting && !device.isLive && (
             <div className="absolute inset-0 bg-indigo-950/40 backdrop-blur-[1px] flex flex-col items-center justify-center p-3 z-20 text-center animate-fade-in">
               <div className="w-10 h-10 rounded-full bg-indigo-600/90 border border-indigo-400 flex items-center justify-center text-white mb-2 shadow-lg animate-pulse">
                 <Play className="w-5 h-5 ml-0.5 text-white fill-white" />

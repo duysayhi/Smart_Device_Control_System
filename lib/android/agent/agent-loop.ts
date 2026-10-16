@@ -3,7 +3,7 @@ import { createExecutionContext, type ActionOutcome } from '../condition-executo
 import type { AdbRunner } from '../executor';
 import type { Observation, ObserverProgress } from '../state-observer';
 import { asAndroidError, checkCancellation, AndroidExecutionError } from '../errors';
-import { assertPlanPolicy, assessPlanPolicy, isSensitiveControl } from '../security-policy';
+import { assertPlanPolicy, assessPlanPolicy, isSensitiveControl, assessObservedReadNavigation } from '../security-policy';
 import { AgentBudget, AgentLimitError } from './budget';
 import { AgentMemory } from './memory';
 import { AgentDecisionEngine, currentTarget, searchTarget } from './decision-engine';
@@ -12,15 +12,23 @@ import { DecisionSchema, type AgentDecision, type AgentGoal, type AgentProgress 
 import { navigationLayers } from '../browser-navigation';
 import { geometryFingerprint } from '../visual-grounding';
 import { matchUiTarget } from '../ui-understanding';
-import { revalidateCandidate, generateActionCandidates } from './action-candidates';
+import { revalidateCandidate, generateActionCandidates, type ActionCandidate } from './action-candidates';
 import { verifyReversibleNavigation } from '../action-verifier';
+import { goalPackageAllowed, isReadLocationGoal, locationSearchQuery, storageFreeEvidence } from './navigation-semantics';
+import { verifyCandidateOutcome } from './candidate-verifier';
+import type { HumanTapChoice, VisualSummary } from '../visual-grounding';
+import { RecoveryManager, recoverySensitive } from './recovery';
+import { discoveredApplication } from './application-discovery';
+import { genericNativeGoal, nativeContextSafe, nativeReadControl, applicationUiBlocked } from './native-navigation';
+import { resolveAppPackage } from '../capabilities';
 
 export interface AgentExecution {
   backend: string;
   observe(signal?: AbortSignal): Promise<Observation>;
-  execute(action: Action, signal?: AbortSignal, progress?: (value: ObserverProgress) => void): Promise<ActionOutcome>;
+  execute(action: Action, signal?: AbortSignal, progress?: (value: ObserverProgress) => void, candidate?: ActionCandidate): Promise<ActionOutcome>;
   discoveryMemory(): unknown;
   verificationSnapshot?(): Observation | undefined;
+  confirmVisualTap?(choice: HumanTapChoice, plan: ActionPlan, signal?: AbortSignal): Promise<ActionOutcome>;
   close(): Promise<void>;
 }
 export interface DecisionProvider {
@@ -29,45 +37,71 @@ export interface DecisionProvider {
 class AgentPolicyError extends Error {
   constructor(message: string, readonly category: 'SENSITIVE_ACTION' | 'UNKNOWN_UI' = 'UNKNOWN_UI') { super(message); }
 }
-export function policyForAgentAction(goal: AgentGoal, action: Action, snapshot: Observation): ActionPlan {
-  if (snapshot.nodes.some(n => /permissioncontroller|packageinstaller/.test(n.packageName) ||
+export function policyForAgentAction(goal: AgentGoal, action: Action, snapshot: Observation, candidate?: ActionCandidate): ActionPlan {
+  const blockedUi = applicationUiBlocked(goal, snapshot);
+  if (blockedUi) throw new AgentPolicyError(blockedUi);
+  if (recoverySensitive(snapshot) || snapshot.nodes.some(n => /permissioncontroller|packageinstaller/.test(n.packageName) ||
     /Dialog/.test(n.className) && isSensitiveControl(n.text + ' ' + n.description))) throw new AgentPolicyError('A sensitive overlay changed the authorized navigation scope.', 'SENSITIVE_ACTION');
   if (action.type === 'CLICK' && isSensitiveControl(action.target)) throw new AgentPolicyError('Sensitive action is not authorized.', 'SENSITIVE_ACTION');
   if (!goal.allowedActionScope.includes(action.type)) throw new AgentPolicyError('Action is outside the declared goal scope.');
   if (action.type === 'OPEN_APP') {
     if (action.app !== goal.spec.app) throw new Error('Opening another app is not authorized.');
-  } else if (snapshot.foregroundPackage !== goal.packageName) throw new Error('Foreground changed; this action is not authorized.');
-  if (action.type === 'CLICK' && ![searchTarget(goal), currentTarget(goal)].includes(action.target)) throw new Error('Target is not part of the current verified goal scope.');
+  } else if (!goalPackageAllowed(goal, snapshot.foregroundPackage)) throw new Error('Foreground changed; this action is not authorized.');
+  if (candidate && (!revalidateCandidate(candidate, goal, snapshot) || JSON.stringify(candidate.action) !== JSON.stringify(action))) throw new AgentPolicyError('Grounding no longer authorizes this action.');
+  const groundedRead = candidate && action.type === 'CLICK' && ['search_navigation', 'read_navigation'].includes(candidate.semanticRole);
+  if (groundedRead && action.type === 'CLICK') {
+    const node = matchUiTarget(snapshot, action.target, false).node;
+    if (!node || !(nativeReadControl(goal, snapshot, node) || assessObservedReadNavigation(snapshot, node, goal.spec.targetText ?? '', candidate.semanticRole === 'search_navigation').decision === 'ALLOW')) throw new AgentPolicyError('Observed navigation policy denies this control.');
+  }
+  if (action.type === 'CLICK' && !groundedRead && ![searchTarget(goal), currentTarget(goal)].includes(action.target)) throw new Error('Target is not part of the current verified goal scope.');
   if (action.type === 'WAIT_FOR' && ![searchTarget(goal), currentTarget(goal)].includes(action.target)) throw new Error('Wait target is outside the current goal scope.');
-  if (action.type === 'INPUT_TEXT' && action.text !== goal.spec.query) throw new Error('Input text differs from the user goal.');
+  if (action.type === 'SWIPE' && (!candidate || candidate.semanticRole !== 'scroll_discovery')) throw new AgentPolicyError('No grounded scroll region authorizes the gesture.');
+  const requestedQuery = goal.spec.query ?? locationSearchQuery(goal);
+  if (action.type === 'INPUT_TEXT' && action.text !== requestedQuery) throw new Error('Input text differs from the user goal.');
   if (action.type === 'PRESS_KEY' && !['BACK', 'ENTER'].includes(action.key)) throw new Error('This key is outside navigation/search scope.');
   if (action.type === 'PRESS_KEY' && action.key === 'BACK' && !navigationLayers(snapshot).length &&
     !snapshot.nodes.some(n => /Dialog/.test(n.className) || n.resourceId === 'android:id/alertTitle')) throw new AgentPolicyError('No observed reversible navigation layer authorizes BACK.');
   if (action.type === 'PRESS_KEY' && action.key === 'BACK' && snapshot.nodes.some(n => n.focused && /EditText|AutoCompleteTextView/.test(n.className) && n.text.trim())) throw new AgentPolicyError('Unsaved focused input prevents automatic BACK navigation.');
   const context: Action[] = [{ type: 'OPEN_APP', app: goal.spec.app }];
   if (action.type === 'INPUT_TEXT' || action.type === 'PRESS_KEY' && action.key === 'ENTER') {
-    const input = snapshot.nodes.filter(n => n.packageName === goal.packageName && n.focused && n.enabled && n.displayed !== false &&
-      /EditText|AutoCompleteTextView/.test(n.className) && /:id\/(search_edit_text|url_bar|search_query|omnibox)$/.test(n.resourceId));
-    if (input.length !== 1 || !goal.spec.query) throw new Error('No unique observed search input authorizes this action.');
+    const input = snapshot.nodes.filter(n => n.packageName === snapshot.foregroundPackage && n.focused && n.enabled && n.displayed !== false &&
+      /EditText|AutoCompleteTextView/.test(n.className) && /:id\/(search_edit_text|url_bar|search_query|omnibox|search_src_text)$/.test(n.resourceId));
+    if (input.length !== 1 || !requestedQuery) throw new Error('No unique observed search input authorizes this action.');
     context.push({ type: 'CLICK', target: searchTarget(goal) });
   }
   // These prefixes represent observed authorization context, not actions to send.
   const plan = { intent: goal.id, isSensitive: goal.spec.isSensitive, actions: [...context, action] };
   const risk = assessPlanPolicy(plan);
+  const app = discoveredApplication(goal);
+  if (app && !goal.spec.isSensitive && action.type === 'OPEN_APP' && snapshot.deviceSerial === app.serial &&
+    goal.packageName === app.packageName && resolveAppPackage(action.app) === app.packageName) return plan;
+  if (genericNativeGoal(goal) && nativeContextSafe(goal, snapshot) && candidate && action.type === 'SWIPE' && candidate.semanticRole === 'scroll_discovery') return plan;
+  if (groundedRead) return plan;
+  if (isReadLocationGoal(goal) && action.type === 'INPUT_TEXT' && ['com.android.settings', 'com.android.settings.intelligence'].includes(snapshot.foregroundPackage) &&
+    requestedQuery && goal.originalRequest.normalize('NFC').toLowerCase().includes(requestedQuery.normalize('NFC').toLowerCase()) && !isSensitiveControl(requestedQuery)) return plan;
   if (risk.decision !== 'ALLOW') throw new AgentPolicyError(risk.reasons.join(' '), goal.spec.isSensitive || risk.risks.some(r => r === 'SENSITIVE' || r === 'DATA_CHANGE') ? 'SENSITIVE_ACTION' : 'UNKNOWN_UI');
   assertPlanPolicy(plan);
   return plan;
 }
 
 export async function runAgent(goal: AgentGoal, budget: AgentBudget, execution: AgentExecution,
-  decision: DecisionProvider = new AgentDecisionEngine(), signal?: AbortSignal, onProgress?: (event: AgentProgress) => void) {
+  decision: DecisionProvider = new AgentDecisionEngine(), signal?: AbortSignal, onProgress?: (event: AgentProgress) => void,
+  assistance?: (visual: VisualSummary, publish: (token: string, expiresAt: number) => void) => Promise<HumanTapChoice>) {
   const memory = new AgentMemory();
+  const recovery = new RecoveryManager();
+  let recoveryStarted: number | undefined;
   let last: Observation | undefined, terminal: AgentProgress | undefined;
   const emit = (status: AgentProgress['status'], reason: string, extra: Partial<AgentProgress> = {}) => {
+    const failure = memory.failures.at(-1);
     const event: AgentProgress = { type: 'progress', status, goalId: goal.id, description: goal.description,
       subgoal: goal.subgoals[goal.currentSubgoal]?.description, verifiedSubgoals: goal.subgoals.filter(s => s.status === 'VERIFIED').length,
       subgoalId: goal.subgoals[goal.currentSubgoal]?.id,
-      totalSubgoals: goal.subgoals.length, reason: reason.slice(0, 180), screen: last?.screen, foregroundPackage: last?.foregroundPackage, ...budget.summary(), ...extra };
+      totalSubgoals: goal.subgoals.length, reason: reason.slice(0, 180), screen: last?.screen, foregroundPackage: last?.foregroundPackage,
+      resultEvidence: last ? storageFreeEvidence(goal, last) : undefined,
+      recovery: recovery.summary(),
+      failure: failure?.message ? { code: failure.code, message: failure.message } : undefined, ...budget.summary(), ...extra };
+    if (status === 'COMPLETED' && memory.selection && last) event.destinationEvidence = {
+      title: memory.selection.title, ordinal: memory.selection.ordinal, url: memory.selection.url, snapshotId: last.snapshotId };
     onProgress?.(event); return event;
   };
   const block = (reason: string, category: NonNullable<AgentProgress['assistance']>['category'] = 'UNKNOWN_UI', visual?: AgentProgress['visual']) => {
@@ -97,9 +131,15 @@ export async function runAgent(goal: AgentGoal, budget: AgentBudget, execution: 
       budget.timings.verificationMs += Math.round(performance.now() - evaluationStarted);
       if (satisfied && prior && prior.subgoalId === current.id && ['INPUT_TEXT', 'PRESS_KEY'].includes(prior.action.type)) prior.verification = 'VERIFIED';
       if (seen.repeated) { block('Unchanged screen and goal progress repeated; stop the loop safely.'); break; }
+      const recoveryDecision = recovery.next(goal, last, budget, reason => emit('VERIFYING', reason));
+      memory.recovery = recovery.summary();
+      if (recovery.active && recoveryStarted === undefined) recoveryStarted = performance.now();
+      if (!recovery.active && recoveryStarted !== undefined) {
+        budget.timings.recoveryMs += Math.round(performance.now() - recoveryStarted); recoveryStarted = undefined;
+      }
       emit('DECIDING', 'Choose one next operation from observed state and remaining budget.');
       const callsBefore = budget.counters.reasoning;
-      const next = DecisionSchema.parse(await decision.decide(goal, last, memory, execution.discoveryMemory(), budget, signal));
+      const next = DecisionSchema.parse(recoveryDecision ?? await decision.decide(goal, last, memory, execution.discoveryMemory(), budget, signal));
       const grounding = next.type === 'EXECUTE_ACTION' ? next.grounding : undefined;
       if (grounding && (grounding.snapshotId !== last.snapshotId || !generateActionCandidates(goal, last).some(candidate =>
         candidate.candidateId === grounding.candidateId && candidate.targetElementId === grounding.targetElementId &&
@@ -135,7 +175,7 @@ export async function runAgent(goal: AgentGoal, budget: AgentBudget, execution: 
       }
       const action: Action = next.type === 'EXECUTE_ACTION' ? next.action :
         { type: 'WAIT_FOR', target: next.target, timeoutMs: Math.max(1, Math.min(15000, Math.floor(budget.remaining()))) };
-      try { policyForAgentAction(goal, action, last); }
+      try { policyForAgentAction(goal, action, last, grounding); }
       catch (error) { block('Independent policy or the current goal scope denies this action.', error instanceof AgentPolicyError ? error.category : 'UNKNOWN_UI'); break; }
       if (memory.alreadyAttempted(action, current?.id ?? '', seen.fingerprint)) {
         const verifiedReopen = action.type === 'OPEN_APP' && budget.counters.replans > 0 && memory.actions.some(row => row.action.type === 'OPEN_APP' && row.verification === 'VERIFIED');
@@ -144,15 +184,17 @@ export async function runAgent(goal: AgentGoal, budget: AgentBudget, execution: 
       }
       budget.consume('steps');
       const row = { action, fingerprint: seen.fingerprint, subgoalId: current?.id ?? '', verification: 'FAILED' as 'FAILED' | 'SENT' | 'VERIFIED', reason: next.reason,
+        recoverySubtaskId: recovery.active?.subtaskId,
         ...(next.type === 'EXECUTE_ACTION' && next.grounding ? { candidateId: next.grounding.candidateId, candidateSnapshotId: next.grounding.snapshotId } : {}) };
       memory.actions.push(row);
       emit(next.type === 'EXPLORE_UI' ? 'EXPLORING' : 'EXECUTING', next.reason, { action });
+      checkCancellation(signal);
       const started = performance.now();
       try {
         const outcome = await execution.execute(action, signal, progress => {
           emit(progress.exploration ? 'EXPLORING' : 'VERIFYING', progress.exploration?.reason ?? 'Executor is validating an observed condition.',
             { action, screen: progress.evidence?.screen ?? last?.screen, foregroundPackage: progress.evidence?.foregroundPackage ?? last?.foregroundPackage });
-        });
+        }, grounding);
         memory.lastOutcome = outcome; memory.selection = outcome.selection ?? memory.selection;
         row.verification = outcome.verification === 'VERIFIED' ? 'VERIFIED' : 'SENT';
         emit('VERIFYING', outcome.postcondition ?? 'Observe again to verify the goal, not merely dispatch.');
@@ -160,50 +202,100 @@ export async function runAgent(goal: AgentGoal, budget: AgentBudget, execution: 
         // never as a snapshot for a subsequent action. Player metadata can hide
         // during playback between two redundant reads.
         const verified = execution.verificationSnapshot?.();
-        if (outcome.verification === 'VERIFIED' && current && goal.currentSubgoal === goal.subgoals.length - 1 && verified &&
+        if (!recovery.active && outcome.verification === 'VERIFIED' && current && verified &&
           Date.now() - verified.timestamp >= 0 && Date.now() - verified.timestamp <= 5000 &&
           criterionSatisfied(goal, current.criterion, verified, memory.selection)) {
           current.status = 'VERIFIED'; goal.currentSubgoal++; last = verified;
-          terminal = emit('COMPLETED', 'Final goal criterion independently checked against the executor postcondition snapshot.');
+          if (goal.subgoals.every(sub => sub.status === 'VERIFIED')) terminal = emit('COMPLETED', 'Final goal criterion independently checked against the executor postcondition snapshot.');
+          else emit('VERIFYING', 'Subgoal independently checked against the executor postcondition snapshot.');
         }
       } catch (error) {
         if (error instanceof AgentLimitError) throw error;
         checkCancellation(signal);
         const failure = asAndroidError(error);
-        memory.failures.push({ code: failure.code, action });
+        memory.failures.push({ code: failure.code, action, message: failure.message.slice(0, 180) });
         if (failure.selection) memory.selection = failure.selection;
-        if (failure.visual || ['AMBIGUOUS', 'CONFIG_ERROR', 'NOT_FOUND', 'SCROLL_LIMIT_REACHED', 'UNKNOWN'].includes(failure.code)) {
+        if (!recovery.active && failure.visual?.status === 'HUMAN_REQUIRED' && assistance && execution.confirmVisualTap && action.type === 'CLICK' &&
+          failure.visual.ordinalVerified && failure.visual.coherent && !goal.spec.isSensitive) {
+          const visual = failure.visual;
+          const assistanceStarted = performance.now();
+          let choice: HumanTapChoice;
+          try {
+            choice = await assistance(visual, (token, expiresAt) => emit('NEED_HUMAN_ASSISTANCE', failure.message, {
+              assistance: { category: 'INTERACTION_POSITION', resumable: true, sessionRetained: true, token, expiresAt, evidenceId: visual.id }, visual }));
+          } finally { budget.timings.assistanceMs += Math.round(performance.now() - assistanceStarted); }
+          budget.check(); checkCancellation(signal);
+          emit('VERIFYING', 'Confirmation received; revalidate screen pixels, hierarchy and policy before any tap.');
+          const plan = { intent: goal.id, isSensitive: false, actions: [{ type: 'OPEN_APP' as const, app: goal.spec.app }, action] };
+          const outcome = await execution.confirmVisualTap(choice, plan, signal);
+          memory.lastOutcome = outcome; memory.selection = outcome.selection ?? memory.selection;
+          row.verification = outcome.verification === 'VERIFIED' ? 'VERIFIED' : 'SENT';
+          const verified = execution.verificationSnapshot?.();
+          if (outcome.verification === 'VERIFIED' && current && goal.currentSubgoal === goal.subgoals.length - 1 &&
+            goal.subgoals.slice(0, -1).every(sub => sub.status === 'VERIFIED') && verified && Date.now() - verified.timestamp >= 0 && Date.now() - verified.timestamp <= 5000 &&
+            criterionSatisfied(goal, current.criterion, verified, memory.selection)) {
+            current.status = 'VERIFIED'; goal.currentSubgoal++; last = verified;
+            terminal = emit('COMPLETED', 'Human-confirmed activation and the requested destination independently verified in the original Session.');
+          } else emit('VERIFYING', 'Confirmed tap sent; completion still requires destination evidence.');
+          continue;
+        }
+        if (failure.visual || ['AMBIGUOUS', 'CONFIG_ERROR', 'SCROLL_LIMIT_REACHED'].includes(failure.code)) {
           block(failure.visualFailure ?? failure.message, failure.code === 'CONFIG_ERROR' ? 'SENSITIVE_ACTION' : 'INTERACTION_POSITION', failure.visual); break;
         }
         if (['DEVICE_ERROR', 'SESSION_ERROR', 'BACKEND_ERROR'].includes(failure.code)) { terminal = emit('FAILED', failure.message); break; }
+        if (recovery.active) {
+          budget.consume('retries');
+          emit('OBSERVING', 'Recovery postcondition is uncertain; observe once without replaying the action.');
+          continue;
+        }
         budget.consume('retries');
         emit('OBSERVING', 'Postcondition was not verified; observe once before deciding whether another operation is safe.');
       } finally { budget.timings.executionMs += Math.round(performance.now() - started); }
     }
   } catch (error) {
     const cancelled = signal?.aborted && signal.reason?.name !== 'TimeoutError';
-    terminal = emit(cancelled ? 'CANCELLED' : error instanceof AgentLimitError ? 'BLOCKED' : 'FAILED',
-      error instanceof AgentLimitError ? error.message : error instanceof AndroidExecutionError ? error.message : 'Agent stopped because a decision or backend operation could not be safely validated.');
+    terminal = emit(cancelled || error instanceof AndroidExecutionError && error.code === 'CANCELLED' ? 'CANCELLED' : error instanceof AgentLimitError ? 'BLOCKED' : 'FAILED',
+      error instanceof AgentLimitError ? error.message : error instanceof AndroidExecutionError ? error.message : 'Agent stopped because a decision or backend operation could not be safely validated.',
+      error instanceof AndroidExecutionError ? { failure: { code: error.code, message: error.message } } : {});
   } finally {
+    if (recoveryStarted !== undefined) budget.timings.recoveryMs += Math.round(performance.now() - recoveryStarted);
+    if (terminal?.status === 'CANCELLED' || terminal?.status === 'FAILED' || terminal?.status === 'BLOCKED') recovery.stop(terminal.status, terminal.reason);
+    else if (recovery.active) recovery.stop('BLOCKED', terminal?.reason ?? 'Execution stopped.');
+    memory.recovery = recovery.summary();
     try { await execution.close(); }
     catch { terminal = emit('FAILED', 'Session cleanup failed; do not start another execution until the device lock is inspected.'); }
   }
-  const result = { ...terminal!, type: 'complete' as const, ...budget.summary() };
+  const result = { ...terminal!, recovery: recovery.summary(), type: 'complete' as const, ...budget.summary() };
   onProgress?.(result);
   return { result, memory };
 }
 
 export async function createAgentExecution(goal: AgentGoal, budget: AgentBudget, serial: string, run: AdbRunner, signal?: AbortSignal) {
+  const app = discoveredApplication(goal);
+  if (app && app.serial !== serial) throw new AndroidExecutionError('SESSION_ERROR', 'Application discovery belongs to a different device.');
+  if (app && resolveAppPackage(goal.spec.app) !== app.packageName) throw new AndroidExecutionError('CONFIG_ERROR', 'Goal app no longer matches its discovered launcher.');
   if ((process.env.ANDROID_EXECUTOR_BACKEND ?? 'appium') !== 'appium') throw new Error('Agent requires Appium; no automatic backend switch is allowed.');
   let verifiedSnapshot: Observation | undefined;
+  let activeCandidate: ActionCandidate | undefined;
+  let executing = false;
   const execution = await createExecutionContext(serial, [{ type: 'OPEN_APP', app: goal.spec.app }], run, signal, {
     beforeSnapshot: source => budget.recordSnapshot(source), beforeScroll: () => budget.consume('scrolls'),
     onWebVerification: value => { budget.webVerification.push(value); if (budget.webVerification.length > 24) budget.webVerification.shift(); },
     onObservation: ms => { budget.timings.observationMs += ms; }, onVerification: ms => { budget.timings.verificationMs += ms; },
     onVerifiedSnapshot: snapshot => { verifiedSnapshot = snapshot; },
-    beforeKey: (action, snapshot) => { policyForAgentAction(goal, action, snapshot); },
+    beforeKey: (action, snapshot) => { policyForAgentAction(goal, action, snapshot, activeCandidate); },
+    beforeAction: (action, snapshot) => { policyForAgentAction(goal, action, snapshot, activeCandidate); },
+    verifyAction: (_action, before, after) => activeCandidate ? verifyCandidateOutcome(goal, activeCandidate, before, after) : undefined,
+    allowedPackage: packageName => goalPackageAllowed(goal, packageName),
     verifyNavigation: verifyReversibleNavigation,
   });
   return { ...execution, verificationSnapshot: () => verifiedSnapshot,
+    async execute(action: Action, signal?: AbortSignal, progress?: (value: ObserverProgress) => void, candidate?: ActionCandidate) {
+      if (executing) throw new AndroidExecutionError('SESSION_ERROR', 'Another action is already active in this execution.');
+      executing = true;
+      activeCandidate = candidate;
+      try { return await execution.execute(action, signal, progress); }
+      finally { activeCandidate = undefined; executing = false; }
+    },
     async close() { verifiedSnapshot = undefined; await execution.close(); } };
 }

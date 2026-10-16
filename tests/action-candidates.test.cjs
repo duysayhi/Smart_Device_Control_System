@@ -96,6 +96,8 @@ test('Executor verifies BACK instead of treating dispatch as success, and precon
 test('Agent Loop independently rejects an old candidate or a changed action even without a reasoning counter', async () => {
   for (const changedAction of [false, true]) {
     const { goal, budget } = await prepared(), old = snapshot(), fresh = changedAction ? old : snapshot();
+    // Isolate untrusted provider validation from deterministic recovery decisions.
+    budget.limits.recoverySubtasks = 0;
     const candidate = generateActionCandidates(goal, old)[0]; let sent = 0, closed = 0;
     const execution = { backend: 'appium', async observe() { return fresh; }, discoveryMemory() { return {}; }, async execute() { sent++; }, async close() { closed++; } };
     const provider = { async decide() { return { type: 'EXECUTE_ACTION', grounding: candidate,

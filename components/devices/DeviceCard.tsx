@@ -9,18 +9,22 @@ import {
   Wifi, 
   Usb, 
   Monitor,
-  Check
+  Check,
+  Square
 } from 'lucide-react';
 import { Device } from '@/types/device';
 import { DeviceScreen } from './DeviceScreen';
 import { DeviceStatusBadge } from './DeviceStatusBadge';
 import { cn } from '@/lib/utils';
+import type { DeviceTask } from '@/lib/android/agent/runtime-schema';
 
 interface DeviceCardProps {
   device: Device;
   isSelected: boolean;
   onSelectToggle: (deviceId: string) => void;
   onOpenDetail: (device: Device) => void;
+  task?: DeviceTask;
+  onCancelTask?: (task: DeviceTask) => void;
 }
 
 export const DeviceCard: React.FC<DeviceCardProps> = ({
@@ -28,6 +32,8 @@ export const DeviceCard: React.FC<DeviceCardProps> = ({
   isSelected,
   onSelectToggle,
   onOpenDetail,
+  task,
+  onCancelTask,
 }) => {
   return (
     <div 
@@ -45,8 +51,9 @@ export const DeviceCard: React.FC<DeviceCardProps> = ({
           <button
             type="button"
             onClick={() => onSelectToggle(device.id)}
-            disabled={device.isLive && device.status !== 'READY'}
+            disabled={device.isLive && ['OFFLINE', 'UNAUTHORIZED', 'ERROR'].includes(device.status)}
             aria-label={`Chọn thiết bị ${device.name}`}
+            aria-pressed={isSelected}
             className={cn(
               "w-4 h-4 mt-0.5 rounded flex items-center justify-center border transition-all shrink-0",
               isSelected 
@@ -80,6 +87,16 @@ export const DeviceCard: React.FC<DeviceCardProps> = ({
       </div>
 
       {/* Phần A: Màn hình điện thoại hiển thị độc lập */}
+      {task && <div className="px-3 py-2 text-xs border-b border-slate-100 space-y-1 break-words" aria-label={`Agent ${device.serial}`}>
+        <div className="flex justify-between items-center gap-2"><strong>{task.status}</strong>
+          {!task.finishedAt && <button type="button" title="Hủy tác vụ thiết bị" aria-label={`Hủy Agent ${device.serial}`} disabled={task.cancelRequested}
+            onClick={() => onCancelTask?.(task)} className="p-1 border border-slate-200 rounded"><Square size={12} /></button>}
+        </div>
+        <p>{task.request}</p>
+        <p className="text-slate-500">{task.latest?.verifiedSubgoals ?? 0}/{task.latest?.totalSubgoals ?? 0} · {task.latest?.reason}</p>
+        {task.latest?.recovery?.active && <p className="text-amber-700">Recovery: {task.latest.recovery.active.description}</p>}
+        {task.status === 'WAITING_HUMAN' && <p className="text-amber-700">Chờ xác nhận · {device.serial}</p>}
+      </div>}
       <div className="p-4 flex items-center justify-center bg-slate-50/40">
         <div className="w-full max-w-[170px]">
           <DeviceScreen 

@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { queuedOllamaFetch } from '@/lib/android/agent/worker-client';
 import { androidCapabilityPrompt, validateAndroidPlan } from '@/lib/android/capabilities';
 import {
   ActionPlanBaseSchema,
@@ -38,7 +39,7 @@ export async function POST(request: Request) {
     const timeoutMs = Number(process.env.OLLAMA_TIMEOUT_MS ?? 180000);
 
     // 2. Gọi Ollama
-    const response = await fetch(
+    const response = await queuedOllamaFetch(
       `${process.env.OLLAMA_BASE_URL ?? "http://127.0.0.1:11434"}/api/chat`,
       {
         method: "POST",

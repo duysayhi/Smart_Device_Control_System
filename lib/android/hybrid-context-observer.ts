@@ -4,9 +4,9 @@ import type { ManagedAppiumSession } from './appium/session-manager';
 import type { AppiumElement } from './appium/client';
 import { AndroidExecutionError, checkCancellation } from './errors';
 import { isSensitiveControl } from './security-policy';
-import { canonicalUiText, normalizeUiText } from './ui-understanding';
+import { normalizeUiText } from './ui-understanding';
 import { withSessionContextLock } from './appium/session-operation-lock';
-import { matchesBrowserDestination } from './browser-destination';
+import { matchesBrowserDestination, matchesBrowserResultTitle } from './browser-destination';
 export { withSessionContextLock } from './appium/session-operation-lock';
 
 const WebLinkSchema = z.object({ selector: z.string().min(1), href: z.string().url(), url: z.string().url(), title: z.string().min(1),
@@ -165,12 +165,12 @@ export class HybridContextObserver {
         let previousState = '', unchanged = 0;
         while (performance.now() - started < timeoutMs) {
           const after = await read('DOM_VERIFY'), actual = new URL(after.url);
-          const content = canonicalUiText([after.title, ...after.headings].join(' '));
+          const titleMatches = matchesBrowserResultTitle(selected.title, selected.url, after);
           const pageError = /\b(?:404|403|500|not found|access denied|captcha|unavailable)\b/.test(normalizeUiText(after.title));
           this.accounting?.onWebVerification?.({ phase: 'DESTINATION', urlMatches: matchesBrowserDestination(expectedUrl.href, after),
-            titleMatches: content.includes(canonicalUiText(selected.title)), ready: after.readyState === 'complete', pageError, changed: actual.href !== before.url });
+            titleMatches, ready: after.readyState === 'complete', pageError, changed: actual.href !== before.url });
           if (matchesBrowserDestination(expectedUrl.href, after) && after.readyState === 'complete' &&
-            !pageError && content.includes(canonicalUiText(selected.title)) && actual.href !== before.url) return { title: after.title, selectedTitle: selected.title, url: selected.url, finalUrl: after.url };
+            !pageError && titleMatches && actual.href !== before.url) return { title: after.title, selectedTitle: selected.title, url: selected.url, finalUrl: after.url };
           const signature = JSON.stringify([after.url, after.title, after.headings, after.readyState]);
           unchanged = signature === previousState ? unchanged + 1 : 0; previousState = signature;
           await delay(Math.min(1000, 250 * 2 ** Math.min(unchanged, 2), remaining()), undefined, { signal }).catch(() => checkCancellation(signal));

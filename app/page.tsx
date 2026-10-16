@@ -5,8 +5,11 @@ import { DashboardLayout } from '@/components/layout/DashboardLayout';
 import { StatsOverview } from '@/components/dashboard/StatsOverview';
 import { DeviceGrid } from '@/components/devices/DeviceGrid';
 import { AICommandPanel } from '@/components/commands/AICommandPanel';
-import { TaskQueue } from '@/components/executions/TaskQueue';
+import { AgentTaskHistory } from '@/components/executions/AgentTaskHistory';
 import { useDashboardDemo } from '@/hooks/useDashboardDemo';
+import { useAgentRuntimes } from '@/hooks/useAgentRuntimes';
+import { useDevicePreviews } from '@/hooks/useDevicePreviews';
+import { latestDeviceTasks } from '@/lib/android/agent/runtime-schema';
 
 export default function DashboardPage() {
   const [activeTab, setActiveTab] = React.useState('dashboard');
@@ -33,16 +36,25 @@ export default function DashboardPage() {
     executionSteps,
     executionStatus,
     executionError,
-    tasks,
     searchQuery,
     setSearchQuery,
     handleAnalyzeCommand,
     handleExecuteCommand,
     handleStopExecution,
     handleSimulateDeviceAction,
-    handleRerunTask,
     clearLogs,
   } = useDashboardDemo();
+  const runtime = useAgentRuntimes();
+  const [detailSerial, setDetailSerial] = React.useState<string>();
+  const [inspectedExecutionId, setInspectedExecutionId] = React.useState<string>();
+  const focusDevice = (serial: string) => { setInspectedExecutionId(undefined); handleAndroidDeviceChange(serial); };
+  const deviceTasks = latestDeviceTasks(runtime.tasks);
+  const runtimeDevices = devices.map(device => {
+    const task = deviceTasks.get(device.serial);
+    return { ...device, status: task?.connectionState && task.connectionState !== 'device' ? 'OFFLINE' as const :
+      task && !task.finishedAt ? 'EXECUTING' as const : device.status };
+  });
+  const liveDevices = useDevicePreviews(runtimeDevices, selectedDeviceIds, detailSerial);
 
   return (
     <DashboardLayout
@@ -52,14 +64,16 @@ export default function DashboardPage() {
       onTabChange={setActiveTab}
     >
       {/* 6. Statistics Cards – 4 Card tổng quan trạng thái */}
-      <StatsOverview devices={devices} />
+      <StatsOverview devices={liveDevices} />
 
       {/* Khu vực giữa: Live Device Grid (65-70%) & AI Command Panel (30-35%) */}
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
         {/* 7. Live Device Grid - Chiếm 7-8/12 cột (khoảng 65-70%) */}
         <section className="lg:col-span-8 flex flex-col min-w-0">
           <DeviceGrid
-            devices={devices}
+            devices={liveDevices}
+            runtime={runtime}
+            onDetailChange={setDetailSerial}
             selectedDeviceIds={selectedDeviceIds}
             onSelectToggle={handleSelectToggle}
             onSelectAll={handleSelectAll}
@@ -72,11 +86,14 @@ export default function DashboardPage() {
         {/* 8. AI Command Panel - Chiếm 4/12 cột (khoảng 30-35%) */}
         <aside className="lg:col-span-4 flex flex-col min-w-0">
           <AICommandPanel
+            runtime={runtime}
+            selectedDeviceIds={selectedDeviceIds}
             commandText={commandText}
             onCommandChange={handleCommandChange}
             androidDevices={androidDevices}
             selectedAndroidSerial={selectedAndroidSerial}
-            onAndroidDeviceChange={handleAndroidDeviceChange}
+            onAndroidDeviceChange={focusDevice}
+            inspectedExecutionId={inspectedExecutionId}
             androidDevicesLoading={androidDevicesLoading}
             androidDevicesError={androidDevicesError}
             onRefreshAndroidDevices={refreshAndroidDevices}
@@ -98,11 +115,7 @@ export default function DashboardPage() {
 
       {/* 9. Task Queue – Hàng đợi tác vụ & lịch sử thực thi bên dưới */}
       <section className="pt-2">
-        <TaskQueue
-          tasks={tasks}
-          onRerunTask={handleRerunTask}
-          onStopTask={() => handleStopExecution()}
-        />
+        <AgentTaskHistory runtime={runtime} onInspect={task => { setInspectedExecutionId(task.executionId); handleAndroidDeviceChange(task.deviceId); }} />
       </section>
     </DashboardLayout>
   );

@@ -88,8 +88,10 @@ test('Appium errors distinguish invalid session and socket hang up without expos
 });
 test('session is reused and cleanup executes DELETE once', async () => {
   const calls = [];
+  let capabilities;
   const client = new AppiumClient('http://localhost:4723', async (url, options) => {
     calls.push([options.method, new URL(url).pathname]);
+    if (options.method === 'POST' && url.endsWith('/session')) capabilities = JSON.parse(options.body).capabilities.alwaysMatch;
     const value = options.method === 'POST' && url.endsWith('/session') ? { sessionId: 'test-session' } :
       url.endsWith('/appium/capabilities') ? { capabilities: { udid: 'test' } } : null;
     return new Response(JSON.stringify({ value }));
@@ -98,6 +100,8 @@ test('session is reused and cleanup executes DELETE once', async () => {
   await session.open(); await session.ensureActive(); await session.ensureActive(); await session.close(); await session.close();
   assert.equal(calls.filter(([method, path]) => method === 'POST' && path === '/session').length, 1);
   assert.equal(calls.filter(([method]) => method === 'DELETE').length, 1);
+  assert.equal(capabilities['appium:newCommandTimeout'], 180);
+  assert.equal(capabilities['appium:skipServerInstallation'], true);
 });
 test('device lock prevents overlapping contexts and releases after cleanup', async () => {
   const serial = randomUUID();

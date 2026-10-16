@@ -201,7 +201,19 @@ export class UIExplorer {
         emit('SCROLLING');
         const baseScrollPercent = goal.kind === 'ordinal' && goal.itemType === 'video' && this.memory!.items.length
           ? this.config.videoScrollPercent : this.config.scrollPercent;
-        const scrollPercent = refinedPercent ?? (emptyVideoViewport ? Math.max(baseScrollPercent, this.config.emptyVideoScrollPercent) : baseScrollPercent);
+        let scrollPercent = refinedPercent ?? (emptyVideoViewport ? Math.max(baseScrollPercent, this.config.emptyVideoScrollPercent) : baseScrollPercent);
+        if (goal.kind === 'ordinal' && goal.itemType === 'video' && origin && direction === goal.direction && this.memory!.items.length && !this.memory!.items[goal.ordinal - 1]) {
+          const evidence = discoveryCandidates(snapshot, chosenRegion, goal);
+          const tail = evidence.candidates.at(-1);
+          if (tail) {
+            const clipped = clippedBounds(snapshot, tail.node), height = chosenRegion.bounds[3] - chosenRegion.bounds[1];
+            // Preserve an observed identity instead of skipping short cards.
+            const keep = Math.min((clipped[3] - clipped[1]) * .5, height * .25);
+            const overlapPercent = (clipped[3] - chosenRegion.bounds[1] - keep) / height;
+            if (overlapPercent <= 0) return finish('AMBIGUOUS', 'No observed overlap anchor authorizes further ordinal scrolling.');
+            scrollPercent = overlapPercent >= .1 ? Math.min(scrollPercent, overlapPercent) : Math.min(scrollPercent, .2);
+          }
+        }
         const more = await this.scrollController.scroll(snapshot, chosenRegion, direction, scrollPercent, remaining(), signal, this.config.scrollSpeed);
         metrics.scrollCount++;
         emit('WAITING_DATA', undefined, `${direction}: scrollPercent=${scrollPercent}, canScrollMore=${more}`);

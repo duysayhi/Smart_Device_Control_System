@@ -590,3 +590,78 @@ node.exe --test tests/android-executor.test.cjs tests/state-observer.test.cjs te
 ```
 
 Không chạy harness cùng Dashboard execution. Report JSON lưu ở TEMP; đọc `mode`, `status`, action `verification`, reasoning metadata và cleanup, không chỉ nhìn exit code. `--dom-trace` tùy chọn ghi URL/title/H1 local để chẩn đoán trang công khai; không gửi tới model và cần kiểm tra dữ liệu trước chia sẻ. Bản mới có 191/191 unit và 11/11 API PASS; phạm vi nghiệm thu/hạn chế được tách rõ trong báo cáo.
+
+### Milestone 3.2: Multi-Candidate Reasoning
+
+**Đã nghiệm thu lựa chọn nhiều candidate bằng Qwen thật trong Settings:** chọn Search thay vì cuộn, rồi chọn mục Bộ nhớ thay vì cuộn tiếp; hai click VERIFIED và goal COMPLETED 2/2. Bài này đọc màn hình **RAM 4 GB**, không phải chứng minh dung lượng lưu trữ flash. Manifest có preconditions, safety, verification và goalRelation; model chỉ chọn ID, không tự viết selector/action. Backend kiểm tra policy và state trước dispatch.
+
+Trong tab **Goal Agent**, dùng `Mở Cài đặt và tìm nơi xem dung lượng bộ nhớ.`. Giữ điện thoại mở khóa và không thao tác đồng thời. Profile Settings/Search/Device Care giới hạn trong navigation/read goal; không dọn RAM, reset hoặc đổi cài đặt. Các topic mới chưa có verifier không tự COMPLETE khi chỉ thấy label.
+
+Chrome tìm hướng dẫn Python trên Windows và mở kết quả đầu tiên đã COMPLETED 3/3; verifier xử lý hậu tố hostname trong title khi URL/canonical/navigation/title/H1 có đủ bằng chứng. OpenAI và Settings cũ hồi quy PASS. YouTube vẫn BLOCKED do mất overlap/ordinal continuity trước khi xác minh activation video thứ hai. Không coi multi-candidate Chrome/YouTube đã được kiểm thử chỉ vì rules-only hoặc unit mock PASS.
+
+```powershell
+# Chạy tuần tự, thay EXAMPLE_SERIAL bằng serial thật:
+node.exe tests/agent-candidates.integration.cjs EXAMPLE_SERIAL settings --run --require-multi
+node.exe tests/agent-candidates.integration.cjs EXAMPLE_SERIAL chrome --run
+node.exe tests/agent-candidates.integration.cjs EXAMPLE_SERIAL youtube --run
+# Thêm tests/multi-candidates.test.cjs và tests/browser-title-evidence.test.cjs vào lệnh unit ở trên.
+```
+
+Kết quả: 205/205 unit, 11/11 API, TypeScript và lint phần sửa PASS. [Báo cáo Milestone 3.2](docs/milestone-3.2-multi-candidate-report.md) có candidate ID/snapshot/decision thật, thời gian/token, các lượt BLOCKED và giới hạn. `--require-multi` chỉ PASS khi có lựa chọn thật giữa các role khác nhau, action VERIFIED và goal COMPLETED; không có scene đủ evidence thì NOT TESTED/BLOCKED. Report ở TEMP cần kiểm tra trước chia sẻ. Không triển khai Milestone 4, không đổi model hoặc public Action Plan schema/prompt cũ.
+
+### Autonomous Task Completion V1
+
+Trong Dashboard, chọn **Goal Agent**, chọn một Android USB đã cấp quyền, nhập mục tiêu rồi nhấn **Chạy Agent**. Không có điện thoại vẫn mở được Dashboard và chạy unit tests, nhưng không thể thực thi hoặc nghiệm thu Android. Không chạy harness đồng thời với Dashboard.
+
+Các câu mục tiêu được hỗ trợ:
+
+- `Tìm hướng dẫn cài đặt Python trên Windows và mở bài hướng dẫn đầu tiên phù hợp.`
+- `Mở Cài đặt và xem dung lượng lưu trữ còn trống của điện thoại.`
+- `Tìm podcast tiếng Anh và phát video thông thường thứ hai.`
+
+Chrome và lưu trữ có lượt Dashboard thật thành công trước đó. Lưu trữ khác RAM: nếu UI chỉ có tổng/đã dùng, kết quả còn trống được ghi rõ là phép tính xấp xỉ. **YouTube vẫn chưa nghiệm thu video thứ hai**, không coi tìm kiếm xong là đã phát.
+
+Khi có ảnh hỗ trợ hợp lệ, chọn vùng phát trên ảnh rồi nhấn **Xác nhận vùng phát**. Backend chỉ tiếp tục cùng Session sau khi kiểm tra lại màn hình và policy; xác nhận hết hạn tối đa sau 120 giây hoặc khi hết ngân sách goal. Nút **Hủy** hủy tác vụ đang chạy/chờ và backend đóng Session. Không dùng xác nhận vùng phát để chấp thuận đăng nhập, thanh toán hay thao tác nhạy cảm. Nếu chưa chứng minh được thứ tự video hoặc ảnh không ổn định, Agent vẫn dừng an toàn, không click đoán.
+
+Cập nhật offline 15/10/2026: 215/215 regression tests PASS; các sửa đổi sau khi mất kết nối chưa được kiểm thử lại trên điện thoại. Luồng hỗ trợ đã được kiểm tra bằng mock/API unit, chưa phải bằng chứng resume thật trên Android. Xem [báo cáo sản phẩm và giới hạn](docs/autonomous-task-completion-report.md) để phân biệt kết quả thật, mô phỏng và những phần chưa đạt.
+
+### Milestone 5: Multi-Device Agent
+
+Dashboard hiện theo dõi Agent qua worker Node cục bộ, độc lập với HTTP stream và Next.js hot reload. Cài đủ dependencies (kể cả TypeScript), giữ Appium/Ollama chạy như phần cài đặt ở trên, rồi chạy `npm run dev`. Worker tự khởi động khi Dashboard đọc runtime; không dùng `--session-override` cho Appium. Không đổi model cho từng điện thoại.
+
+Trong **Goal Agent**:
+
+- Chọn thiết bị trong dropdown, nhập mục tiêu và bấm **Chạy Agent** để giao riêng.
+- Đánh dấu nhiều thiết bị USB trong lưới rồi bấm **Chạy nhóm** để gửi cùng mục tiêu. Mỗi máy có execution riêng.
+- Đổi thiết bị đang xem để nhập mục tiêu khác; máy đang chạy không khóa các máy còn lại.
+- Theo dõi trạng thái, recovery và verification trên từng thẻ/lịch sử. **Hủy** chỉ hủy execution đó; **Hủy nhóm** hủy các execution thuộc cùng batch.
+- Human Assistance hiển thị serial và chỉ xác nhận cho execution đang xem. Ảnh được tải theo yêu cầu, không nhúng lại vào mọi lần polling.
+- Reload hoặc đóng tab không hủy task. Muốn dừng phải dùng nút hủy; không tự resume thao tác sau khi worker bị restart.
+
+Worker có thể chạy thủ công để xem lỗi:
+
+```powershell
+npm run agent:worker
+# Terminal khác:
+npm run dev
+```
+
+Khi dừng dự án hoặc nạp lại code worker: dừng Next.js trước bằng `Ctrl+C`, sau đó chạy `npm run agent:worker:stop`. Lệnh stop yêu cầu worker hủy các task còn hoạt động và cleanup Session. Dừng Next.js đơn lẻ không dừng worker. Không kill Appium/Ollama để hủy một thiết bị.
+
+Worker lưu địa chỉ/token và journal trong thư mục TEMP riêng theo dự án; không chia sẻ token. Journal không lưu ảnh/XML hoặc token Human Assistance. Sau hard crash, task cũ thành BLOCKED; kiểm tra Session/ADB forward/device lock trước khi chạy mới, không tự xóa lock đang có chủ sở hữu chưa rõ.
+
+Giới hạn hiện tại: Android USB đã cấp quyền; tối đa 4 execution chủ động, mục tiêu kiểm thử 2 máy. Qwen xử lý 1 request tại một thời điểm, queue tối đa 16 request chờ. Preview máy chọn cập nhật khoảng 4 giây, máy không chọn khoảng 20 giây; trang ẩn tạm dừng preview. Đây là ảnh ADB nén, không phải video stream.
+
+Chi tiết kết quả thật/mô phỏng và file thay đổi: [báo cáo Milestone 5](docs/milestone-5-multi-device-report.md). Một Samsung thật đã kiểm tra reload và hủy riêng; không coi đây là nghiệm thu hai điện thoại thật chạy song song.
+
+### Mở Rộng Nhiều Ứng Dụng Native
+
+Dùng tab **Goal Agent**, chọn Android thật rồi nhập `Mở <ứng dụng>` hoặc `Mở <package> và tìm <nhãn>`. Agent phân giải launcher bằng Package Manager của đúng điện thoại, không đoán package của hãng khác. Camera, Calendar, Calculator và Gallery thử dùng intent/category Android chuẩn; nếu máy không công bố mặc định hoặc có nhiều lựa chọn, dùng package chính xác. Tên khác chỉ được khớp theo token package duy nhất trong danh sách launcher, không phải nhận diện đầy đủ tên hiển thị ứng dụng.
+
+Ví dụ đã kiểm tra trên Samsung hiện tại: `Mở com.sec.android.app.popupcalculator`. Có thể dùng `Mở <package> và mở trang <nhãn>` cho trang/tab đọc được nhận diện từ UI thật, như Albums/Library/History/About/Giờ quốc tế. Nút phải có ngữ nghĩa điều hướng đọc, target duy nhất và bằng chứng mới; backend kiểm tra lại trước click rồi xác minh heading đích. Tên tab hiện trên màn hình chưa đủ để báo đã mở trang. Khi chưa thấy target, Agent chỉ cuộn trong vùng native đã xác định, có giới hạn ngân sách.
+
+Đây là mở rộng **mở app, tìm phần tử và điều hướng đọc native**, chưa phải điều khiển mọi chức năng của mọi ứng dụng. Gửi tin, chụp/lưu ảnh, tạo báo thức, đăng nhập, thanh toán, xóa dữ liệu hoặc cấp quyền chưa được tự động cho phép. Không có Vision adapter mới; UI chỉ có hình/canvas/WebView không được click đoán. Action Plan cũ giữ nguyên schema/phạm vi; dùng Goal Agent cho luồng mở rộng này.
+
+Xem [báo cáo multi-app và giới hạn kiểm chứng](docs/multi-application-report.md). Code worker thay đổi cần nạp lại lúc không có execution đang chạy; không cần đổi/tải model.
+
+Kiểm chứng bổ sung trên Samsung đã mở khóa: `Mở com.sec.android.app.clockpackage và mở trang Giờ quốc tế` đã COMPLETED 2/2 trong 19,685 giây, một click có grounding, xác minh trang đích và không tạo/thay đổi báo thức. Lượt này không cần gọi Qwen; không coi đây là nghiệm thu reasoning AI trên mọi ứng dụng hoặc nhiều hãng Android.

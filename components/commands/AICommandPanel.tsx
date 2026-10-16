@@ -8,6 +8,7 @@ import { PlanStatus, ActionPlan, LogEntry } from '@/types/command';
 import { AndroidAdbDevice } from '@/types/device';
 import { ExecutionStepResult } from '@/types/execution';
 import { AgentGoalPanel } from './AgentGoalPanel';
+import type { AgentRuntimeControl } from '@/hooks/useAgentRuntimes';
 
 const explorationLabels = {
   SEARCHING: 'Đang tìm phần tử', CHECKING_LIST: 'Đang kiểm tra danh sách', SCROLLING: 'Đang cuộn',
@@ -36,6 +37,9 @@ interface AICommandPanelProps {
   onExecuteCommand: () => void;
   onStopExecution: () => void;
   onClearLogs?: () => void;
+  runtime: AgentRuntimeControl;
+  selectedDeviceIds: string[];
+  inspectedExecutionId?: string;
 }
 
 export const AICommandPanel: React.FC<AICommandPanelProps> = ({
@@ -59,20 +63,22 @@ export const AICommandPanel: React.FC<AICommandPanelProps> = ({
   onExecuteCommand,
   onStopExecution,
   onClearLogs,
+  runtime,
+  selectedDeviceIds,
+  inspectedExecutionId,
 }) => {
-  const [mode, setMode] = React.useState<'plan' | 'agent'>('plan');
-  const [agentBusy, setAgentBusy] = React.useState(false);
+  const [mode, setMode] = React.useState<'plan' | 'agent'>('agent');
   const selectedDevice = androidDevices.find((device) => device.serial === selectedAndroidSerial);
   const targetCount = selectedDevice?.status === 'device' && selectedDevice.connectionType === 'USB' ? 1 : 0;
 
   return (
     <div className="bg-white rounded-xl border border-slate-200 p-5 shadow-xs flex flex-col gap-4">
       <div role="tablist" aria-label="Chế độ thực thi" className="flex border-b border-slate-200 gap-4 text-xs">
-        {(['plan', 'agent'] as const).map(value => <button type="button" role="tab" aria-selected={mode === value} disabled={isExecuting || agentBusy || planStatus === 'ANALYZING'} key={value}
+        {(['plan', 'agent'] as const).map(value => <button type="button" role="tab" aria-selected={mode === value} disabled={isExecuting || planStatus === 'ANALYZING'} key={value}
           onClick={() => setMode(value)} className={`py-2 border-b-2 ${mode === value ? 'border-indigo-600 text-indigo-600' : 'border-transparent text-slate-500'}`}>{value === 'plan' ? 'Action Plan' : 'Goal Agent'}</button>)}
       </div>
       {mode === 'agent' ? <AgentGoalPanel text={commandText} onText={onCommandChange} devices={androidDevices} serial={selectedAndroidSerial}
-        onSerial={onAndroidDeviceChange} onRefresh={onRefreshAndroidDevices} onBusy={setAgentBusy} /> : <>
+        onSerial={onAndroidDeviceChange} onRefresh={onRefreshAndroidDevices} runtime={runtime} selectedDeviceIds={selectedDeviceIds} inspectedExecutionId={inspectedExecutionId} /> : <>
       {/* 8.1. Command Input Section */}
       <CommandInput
         commandText={commandText}

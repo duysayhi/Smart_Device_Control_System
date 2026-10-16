@@ -7,6 +7,8 @@ import { DeviceFilters } from './DeviceFilters';
 import { DeviceDetailModal } from './DeviceDetailModal';
 import { Smartphone, RefreshCcw } from 'lucide-react';
 import { cn } from '@/lib/utils';
+import type { AgentRuntimeControl } from '@/hooks/useAgentRuntimes';
+import { latestDeviceTasks } from '@/lib/android/agent/runtime-schema';
 
 interface DeviceGridProps {
   devices: Device[];
@@ -16,6 +18,8 @@ interface DeviceGridProps {
   onClearSelection: () => void;
   onSimulateDeviceAction?: (deviceId: string, actionName: string) => void;
   searchFilter?: string;
+  runtime?: AgentRuntimeControl;
+  onDetailChange?: (serial?: string) => void;
 }
 
 export const DeviceGrid: React.FC<DeviceGridProps> = ({
@@ -26,11 +30,16 @@ export const DeviceGrid: React.FC<DeviceGridProps> = ({
   onClearSelection,
   onSimulateDeviceAction,
   searchFilter = '',
+  runtime,
+  onDetailChange,
 }) => {
   const [platformFilter, setPlatformFilter] = React.useState<'all' | DevicePlatform>('all');
   const [statusFilter, setStatusFilter] = React.useState<'all' | DeviceStatus>('all');
   const [columnCount, setColumnCount] = React.useState<number>(3);
-  const [activeDetailDevice, setActiveDetailDevice] = React.useState<Device | null>(null);
+  const [detailId, setDetailId] = React.useState<string>();
+  const activeDetailDevice = devices.find(device => device.id === detailId) ?? null;
+  const deviceTasks = latestDeviceTasks(runtime?.tasks ?? []);
+  const [taskError, setTaskError] = React.useState<string>();
 
   // Lọc thiết bị theo platform, status và search query
   const filteredDevices = devices.filter((device) => {
@@ -92,6 +101,7 @@ export const DeviceGrid: React.FC<DeviceGridProps> = ({
       />
 
       {/* 7.2. Lưới thiết bị */}
+      {taskError && <p role="alert" className="text-xs text-rose-600">{taskError}</p>}
       {filteredDevices.length === 0 ? (
         // Empty State khi không tìm thấy thiết bị khớp
         <div className="flex-1 flex flex-col items-center justify-center p-12 text-center border-2 border-dashed border-slate-200 rounded-xl my-4">
@@ -123,9 +133,11 @@ export const DeviceGrid: React.FC<DeviceGridProps> = ({
             <DeviceCard
               key={device.id}
               device={device}
+              task={deviceTasks.get(device.id)}
+              onCancelTask={runtime ? task => { void runtime.command({ type: 'CANCEL', executionId: task.executionId, deviceId: task.deviceId }).catch(error => setTaskError(error.message)); } : undefined}
               isSelected={selectedDeviceIds.includes(device.id)}
               onSelectToggle={onSelectToggle}
-              onOpenDetail={(dev) => setActiveDetailDevice(dev)}
+              onOpenDetail={(dev) => { setDetailId(dev.id); onDetailChange?.(dev.serial); }}
             />
           ))}
         </div>
@@ -133,9 +145,10 @@ export const DeviceGrid: React.FC<DeviceGridProps> = ({
 
       {/* Modal chi tiết điều khiển thiết bị */}
       <DeviceDetailModal
+        task={activeDetailDevice ? deviceTasks.get(activeDetailDevice.id) : undefined}
         device={activeDetailDevice}
         isOpen={Boolean(activeDetailDevice)}
-        onClose={() => setActiveDetailDevice(null)}
+        onClose={() => { setDetailId(undefined); onDetailChange?.(undefined); }}
         onSimulateAction={onSimulateDeviceAction}
       />
     </div>

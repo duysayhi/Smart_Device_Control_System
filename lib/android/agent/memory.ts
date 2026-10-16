@@ -5,14 +5,15 @@ import type { Observation } from '../state-observer';
 import { geometryFingerprint } from '../visual-grounding';
 import { navigationLayers } from '../browser-navigation';
 
-export interface AgentActionRecord { action: Action; fingerprint: string; subgoalId: string; verification: 'VERIFIED' | 'SENT' | 'FAILED'; error?: string; reason: string; candidateId?: string; candidateSnapshotId?: string }
+export interface AgentActionRecord { action: Action; fingerprint: string; subgoalId: string; verification: 'VERIFIED' | 'SENT' | 'FAILED'; error?: string; reason: string; candidateId?: string; candidateSnapshotId?: string; recoverySubtaskId?: string }
 export class AgentMemory {
   readonly actions: AgentActionRecord[] = [];
   readonly observations: { fingerprint: string; screen: string; packageName: string; nodeCount: number; hadDialog: boolean; navigationLayers: string[] }[] = [];
   readonly reasoningStates = new Set<string>();
+  recovery?: import('./recovery').RecoveryProgress;
   selection?: DiscoveredSelection;
   lastOutcome?: ActionOutcome;
-  failures: { code: string; action?: Action }[] = [];
+  failures: { code: string; action?: Action; message?: string }[] = [];
   private repeats = new Map<string, number>();
   observe(s: Observation, progress: number): { fingerprint: string; repeated: boolean } {
     const fingerprint = geometryFingerprint(s);

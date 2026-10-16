@@ -3,7 +3,7 @@ import { normalizeUiText, canonicalUiText, findBrowserResultNodes, browserResult
 import type { DiscoveredSelection } from './exploration/types';
 import { isDescendant } from './exploration/scroll-regions';
 import { navigationLayers } from './browser-navigation';
-import { matchesBrowserDestination } from './browser-destination';
+import { matchesBrowserDestination, matchesBrowserResultTitle } from './browser-destination';
 
 export function verifyReversibleNavigation(before: Observation, after: Observation): boolean {
   if (after.observationStatus !== 'OBSERVED' || before.foregroundPackage !== after.foregroundPackage || uiFingerprint(before) === uiFingerprint(after)) return false;
@@ -32,7 +32,7 @@ export function verifyDiscoveredSelection(selection: DiscoveredSelection, before
     const document = after.web.document;
     return matchesBrowserDestination(expected.href, document) && document.readyState === 'complete' &&
       !/\b(?:404|403|500|not found|access denied|captcha|unavailable)\b/.test(normalizeUiText(document.title)) &&
-      canonicalUiText([document.title, ...document.headings].join(' ')).includes(title);
+      matchesBrowserResultTitle(selection.title, selection.url!, document);
   }
   if (after.web?.status === 'AMBIGUOUS_CONTEXT') return false;
   const actual = addressUrl(after);

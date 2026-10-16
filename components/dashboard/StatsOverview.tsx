@@ -14,7 +14,7 @@ export const StatsOverview: React.FC<StatsOverviewProps> = ({ devices }) => {
   const totalCount = devices.length;
   const readyCount = devices.filter((d) => d.status === 'READY').length;
   const executingCount = devices.filter((d) => d.status === 'EXECUTING' || d.status === 'BUSY').length;
-  const errorCount = devices.filter((d) => d.status === 'ERROR' || d.status === 'FAILED' || d.status === 'UNAUTHORIZED').length;
+  const errorCount = devices.filter((d) => d.status === 'ERROR' || d.status === 'FAILED' || d.status === 'UNAUTHORIZED' || d.status === 'OFFLINE').length;
   const androidCount = devices.filter((device) => device.platform === 'android').length;
   const iosCount = devices.filter((device) => device.platform === 'ios').length;
 
@@ -38,7 +38,7 @@ export const StatsOverview: React.FC<StatsOverviewProps> = ({ devices }) => {
         icon={CheckCircle2}
         iconColor="text-emerald-600"
         iconBg="bg-emerald-50"
-        trendText={`${Math.round((readyCount / (totalCount || 1)) * 100)}% online`}
+        trendText={`${Math.round(((readyCount + executingCount) / (totalCount || 1)) * 100)}% online`}
         chartType="circle"
         badgeColor="bg-emerald-50 text-emerald-700"
       />

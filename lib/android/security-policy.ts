@@ -1,6 +1,8 @@
 import type { Action, ActionPlan } from '../validators/action-plan.schema';
 import type { UiNode } from './targets';
-import { normalizeUiText } from './ui-understanding';
+import { normalizeUiText, matchUiTarget } from './ui-understanding';
+import type { Observation } from './state-observer';
+import { isDescendant } from './exploration/scroll-regions';
 import { AndroidExecutionError } from './errors';
 import { APP_PACKAGE_ALIASES } from './capabilities';
 
@@ -13,7 +15,7 @@ export interface PolicyDecision {
 }
 export function isSensitiveControl(value: string): boolean {
   const normalized = normalizeUiText(value);
-  return /(?:^|[\s/:.])(subscribe|subscribed|like|comment|delete|send|purchase|payment|login|sign in|dang ky|dang nhap|thanh toan|mua hang|xoa)(?:$|\s|button)/.test(normalized);
+  return /(?:^|[\s/:.])(subscribe|subscribed|like|comment|delete|send|purchase|payment|login|sign in|dang ky|dang nhap|thanh toan|mua hang|xoa|don dep|don ngay|clean now|optimize now|toi uu ngay|reset|factory reset|uninstall|format|clear data|clear cache)(?:$|\s|button)/.test(normalized);
 }
 export function unsafeBrowserInput(text: string): boolean {
   const compact = text.trim().replace(/[\u0000-\u0020]/g, '');
@@ -68,4 +70,34 @@ export function assertActionNotSensitive(action: Action): void {
 export function assertObservedControlSafe(node: UiNode): void {
   if (/Switch|CheckBox|RadioButton|ToggleButton/.test(node.className) || isSensitiveControl(node.resourceId) ||
     isSensitiveControl(node.text) || isSensitiveControl(node.description)) throw new AndroidExecutionError('CONFIG_ERROR', 'Observed control changes data/account state or has sensitive semantics; no click was sent.');
+}
+
+export function isReadInformationLabel(subject: string, label: string, resourceId: string): boolean {
+  const text = normalizeUiText(label), topic = normalizeUiText(subject);
+  if (!text || text.length > 100 || isSensitiveControl(text) || /breadcrumb|summary/.test(resourceId)) return false;
+  if (/\b(luu tru|storage)\b/.test(topic)) return /^(luu tru|dung luong luu tru|storage|cham soc (pin va )?thiet bi|device care|battery and device care)$/.test(text);
+  if (/\b(bo nho|memory|ram)\b/.test(topic)) return /^(bo nho|memory|ram|cham soc (pin va )?thiet bi|device care|battery and device care)$/.test(text);
+  const words = topic.split(' ').filter(w => w.length > 3);
+  return words.length > 0 && words.every(w => text.includes(w)) && /title|menu|tab|navigation/.test(resourceId);
+}
+
+export function assessObservedReadNavigation(snapshot: Observation, node: UiNode, subject: string, search: boolean): PolicyDecision {
+  let owner: UiNode | undefined;
+  for (const [kind, value] of [['accessibility_id', node.description], ['text', node.text], ['id', node.resourceId]]) {
+    if (!value) continue;
+    const match = matchUiTarget(snapshot, `${kind}:${value}`, true);
+    if (match.status === 'MATCH') { owner = match.node; break; }
+  }
+  if (!owner && node.resourceId && node.text) {
+    const match = matchUiTarget(snapshot, 'observed:' + JSON.stringify({ resourceId: node.resourceId, text: node.text, className: node.className }), true);
+    if (match.status === 'MATCH') owner = match.node;
+  }
+  const trusted = snapshot.observationStatus === 'OBSERVED' && node.packageName === snapshot.foregroundPackage && node.enabled && node.displayed !== false &&
+    !snapshot.nodes.some(n => /WebView/.test(n.className) && isDescendant(snapshot.nodes, node, n)) &&
+    (search || /title|menu|tab|navigation/.test(node.resourceId)) &&
+    (search ? /^(search|tim kiem)$/.test(normalizeUiText(node.description || node.text)) : isReadInformationLabel(subject, node.text || node.description, node.resourceId)) &&
+    Boolean(owner && !snapshot.nodes.some(n => isDescendant(snapshot.nodes, n, owner) &&
+      (/Switch|CheckBox|RadioButton|ToggleButton|EditText/.test(n.className) || isSensitiveControl(n.text + ' ' + n.description + ' ' + n.resourceId))));
+  return { decision: trusted ? 'ALLOW' : 'BLOCK', risks: [trusted ? 'NAVIGATION' : 'UNKNOWN'], llmDisagreement: false,
+    reasons: [trusted ? 'Observed unique control has goal-related read/search navigation semantics and no data-changing descendants.' : 'Observed control does not prove read-only goal navigation.'] };
 }

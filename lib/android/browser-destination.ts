@@ -1,4 +1,5 @@
 import type { WebDocument } from './hybrid-context-observer';
+import { canonicalUiText } from './ui-understanding';
 
 const resource = (value: string): string => {
   const url = new URL(value);
@@ -18,5 +19,22 @@ export function matchesBrowserDestination(expectedValue: string, document: WebDo
       document.canonicalUrls?.length === 1 && resource(document.canonicalUrls[0]) === resource(document.url) &&
       document.alternateUrls?.some(url => resource(url) === resource(expectedValue)) &&
       document.alternateUrls.some(url => resource(url) === resource(document.url));
+  } catch { return false; }
+}
+
+export function matchesBrowserResultTitle(expectedTitle: string, expectedUrl: string, document: WebDocument): boolean {
+  const expected = canonicalUiText(expectedTitle), titles = [document.title, ...document.headings].map(canonicalUiText);
+  if (!expected) return false;
+  if (titles.some(title => title.includes(expected))) return true;
+  try {
+    const host = new URL(expectedUrl).hostname.replace(/^www\./, '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const branded = expected.match(new RegExp(`^(.+\\S)\\s+[-|\\u2013\\u2014]\\s+${host}$`, 'i'));
+    if (!branded) return false;
+    const article = canonicalUiText(branded[1]);
+    // Only a literal hostname suffix may be removed, with exact title/H1 and independent identity evidence.
+    return matchesBrowserDestination(expectedUrl, document) && document.canonicalUrls?.length === 1 &&
+      resource(document.canonicalUrls[0]) === resource(document.url) && document.navigationType === 'navigate' &&
+      document.navigationUrl !== undefined && resource(document.navigationUrl) === resource(document.url) &&
+      canonicalUiText(document.title) === article && document.headings.some(heading => canonicalUiText(heading) === article);
   } catch { return false; }
 }

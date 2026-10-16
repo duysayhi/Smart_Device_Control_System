@@ -29,6 +29,11 @@ const serial = process.argv[2];
   // Observe the real creation response; do not replace data or create another Session.
   global.fetch = async (url, options) => {
     const response = await realFetch(url, options);
+    if (process.argv.includes('--backend-trace') && !response.ok && String(url).startsWith(process.env.APPIUM_URL ?? 'http://127.0.0.1:4723')) {
+      const failure = (await response.clone().json()).value;
+      console.error(JSON.stringify({ backend: 'APPIUM', method: options?.method, operation: new URL(String(url)).pathname.replace(/\/session\/[^/]+/, '/session/[id]'), error: failure?.error,
+        message: typeof failure?.message === 'string' && !failure.message.includes('<?xml') ? failure.message.slice(0, 1200) : '[details omitted]' }));
+    }
     if (String(url).endsWith('/session') && options?.method === 'POST' && response.ok) {
       currentSession = (await response.clone().json()).value?.sessionId;
     }
