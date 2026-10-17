@@ -101,10 +101,10 @@ export function useDashboardDemo() {
   }, [devices]);
 
   const handleSelectAll = useCallback((deviceIds: string[]) => {
-    const liveDevice = devices.find((device) => device.isLive && device.status === 'READY' && device.connectionType === 'USB' && deviceIds.includes(device.id));
+    const liveDevice = devices.find((device) => device.isLive && device.status === 'READY' && deviceIds.includes(device.id));
     if (liveDevice) {
       selectedAndroidSerialRef.current = liveDevice.serial;
-      const selected = devices.filter(device => device.isLive && device.status === 'READY' && device.connectionType === 'USB' && deviceIds.includes(device.id)).map(device => device.id);
+      const selected = devices.filter(device => device.isLive && device.status === 'READY' && deviceIds.includes(device.id)).map(device => device.id);
       selectedIdsRef.current = selected;
       setSelectedDeviceIds(selected);
       setSelectedAndroidSerial(liveDevice.serial);
@@ -159,7 +159,7 @@ export function useDashboardDemo() {
         ...parsedPlan.data,
         commandPrompt: commandText,
         targetCount: androidDevices.some((device) =>
-          device.serial === selectedAndroidSerial && device.status === 'device' && device.connectionType === 'USB'
+          device.serial === selectedAndroidSerial && device.status === 'device'
         ) ? 1 : 0,
       });
       setPlanStatus('SUCCESS');
@@ -184,7 +184,6 @@ export function useDashboardDemo() {
     if (
       !currentPlan ||
       targetDevice?.status !== 'device' ||
-      targetDevice.connectionType !== 'USB' ||
       isExecuting ||
       executionAbortControllerRef.current
     ) return;
@@ -257,13 +256,16 @@ export function useDashboardDemo() {
             if (step.status === 'PENDING' || loggedStates.get(step.index) === key) continue;
             loggedStates.set(step.index, key);
             confirmedLogs.push({
-              id: `step-${Date.now()}-${step.index}`, timestamp: new Date().toTimeString().split(' ')[0],
+              id: `step-${crypto.randomUUID()}-${step.index}`, timestamp: new Date().toTimeString().split(' ')[0],
               deviceId: targetDevice.serial, deviceName: targetDevice.model,
               message: `${step.action.type}: ${step.errorCode ?? step.exploration?.phase ?? step.phase ?? step.status}${step.waitingFor ? ` (${step.waitingFor})` : ''}${step.exploration ? ` - cuộn ${step.exploration.scrollCount}, snapshot ${step.exploration.snapshotCount}, mới ${step.exploration.newElements}, trùng ${step.exploration.duplicateElements}` : ''}${step.postcondition ? ` - ${step.postcondition}` : ''}`,
               status: step.status === 'FAILED' ? 'FAILED' : step.status === 'SUCCESS' ? 'SUCCESS' : step.status === 'SENT' ? 'INFO' : 'EXECUTING'
             });
           }
-          if (confirmedLogs.length) setLogs((previous) => [...confirmedLogs.reverse(), ...previous].slice(0, 500));
+          if (confirmedLogs.length) {
+            const newestFirst = confirmedLogs.toReversed();
+            setLogs((previous) => [...newestFirst, ...previous].slice(0, 500));
+          }
         }
         if (event.type === 'complete') {
           completed = true;

@@ -12,13 +12,22 @@ import type { Observation } from '../state-observer';
 import { waitForHuman, submitHumanChoice } from './human-assistance';
 import { type DeviceTask, type RuntimeCommandValue, terminalTask } from './runtime-schema';
 import { discoverApplication } from './application-discovery';
+import { acquireDeviceLock } from '../appium/session-manager';
 
 export interface RuntimeAdapter {
+  reserve?(serial: string, executionId: string): Promise<() => Promise<void>>;
   discover(): Promise<AndroidAdbDevice[]>;
   plan(request: string, budget: AgentBudget, signal: AbortSignal, serial?: string): Promise<AgentGoal>;
   open(goal: AgentGoal, budget: AgentBudget, serial: string, signal: AbortSignal): Promise<AgentExecution>;
 }
 export const androidRuntimeAdapter: RuntimeAdapter = {
+  async reserve(serial, executionId) {
+    const identity = (await listAndroidDevices()).find(device => device.serial === serial);
+    if (!identity || identity.status !== 'device') throw new Error('Device disconnected before planning.');
+    const release = await acquireDeviceLock('device-reservation:' + (identity.physicalId ?? serial));
+    try { await release.recordSession('', executionId, serial); return release; }
+    catch (error) { await release(); throw error; }
+  },
   discover: listAndroidDevices,
   async plan(request, budget, signal, serial) {
     if (!serial) throw new Error('Application discovery requires the selected device.');
@@ -31,6 +40,7 @@ export class DeviceRuntimeRegistry {
   private entries = new Map<string, RuntimeEntry>();
   // Scheduling index only. acquireDeviceLock remains the authoritative device owner.
   private activeBySerial = new Map<string, string>();
+  private activeByPhysical = new Map<string, string>();
   private requests = new Map<string, { jobs: string; ids: string[] }>();
   constructor(private readonly adapter: RuntimeAdapter = androidRuntimeAdapter, private readonly changed: () => void = () => {}) {}
   restore(tasks: DeviceTask[]) {
@@ -75,16 +85,23 @@ export class DeviceRuntimeRegistry {
     if (this.requests.has(input.requestId)) return this.start(input);
     const serials = input.jobs.map(job => job.deviceId);
     if (new Set(serials).size !== serials.length) throw new Error('A batch cannot contain the same device twice.');
+    const physicalIds = serials.map(serial => devices.find(d => d.serial === serial)?.physicalId ?? serial);
+    if (new Set(physicalIds).size !== physicalIds.length) throw new Error('USB/Wi-Fi transports in this batch refer to the same physical device.');
     if (this.activeBySerial.size + serials.length > 4) throw new Error('At most four device executions may be active.');
     for (const serial of serials) {
       if (this.activeBySerial.has(serial)) throw new Error('Device already has a scheduled execution: ' + serial);
-      if (!devices.some(d => d.serial === serial && d.status === 'device' && d.connectionType === 'USB')) throw new Error('Device must be an authorized USB Android: ' + serial);
+      const device = devices.find(d => d.serial === serial && d.status === 'device');
+      if (!device || device.connectionType === 'Wi-Fi' && !device.identityVerified) throw new Error('Device must be an authorized, identity-verified Android transport: ' + serial);
+      if (this.activeByPhysical.has(device.physicalId ?? serial)) throw new Error('Physical device already has an Agent through another transport.');
     }
     this.prune();
     const created = input.jobs.map(job => {
-      const task: DeviceTask = { executionId: randomUUID(), batchId: input.requestId, deviceId: job.deviceId, request: job.goal, status: 'QUEUED', createdAt: Date.now(), connectionState: 'device', events: [] };
+      const device = devices.find(d => d.serial === job.deviceId)!;
+      const task: DeviceTask = { executionId: randomUUID(), batchId: input.requestId, deviceId: job.deviceId, physicalId: device.physicalId,
+        connectionMode: device.connectionType, request: job.goal, status: 'QUEUED', createdAt: Date.now(), connectionState: 'device', events: [] };
       const entry: RuntimeEntry = { task, controller: new AbortController(), disconnected: false };
       this.entries.set(task.executionId, entry); this.activeBySerial.set(task.deviceId, task.executionId);
+      this.activeByPhysical.set(task.physicalId ?? task.deviceId, task.executionId);
       return entry;
     });
     this.requests.set(input.requestId, { jobs: jobsKey, ids: created.map(e => e.task.executionId) }); this.changed();
@@ -124,6 +141,7 @@ export class DeviceRuntimeRegistry {
     budget.runtimeIdentity = { executionId: task.executionId, deviceId: task.deviceId };
     const signal = AbortSignal.any([controller.signal, AbortSignal.timeout(budget.limits.timeMs)]);
     let execution: AgentExecution | undefined, loopOwnsCleanup = false;
+    let releaseReservation: (() => Promise<void>) | undefined;
     const publish = (event: AgentProgress) => {
       task.latest = structuredClone(event);
       task.events.push({ ...structuredClone(event), visual: undefined, assistance: event.assistance && { ...event.assistance, token: undefined } });
@@ -134,6 +152,7 @@ export class DeviceRuntimeRegistry {
       this.changed();
     };
     try {
+      releaseReservation = await this.adapter.reserve?.(task.deviceId, task.executionId);
       checkCancellation(signal); task.status = 'RUNNING';
       publish({ type: 'progress', status: 'PLANNING', reason: 'Validating this device goal and its safety scope.', description: task.request });
       const planStart = performance.now(), goal = await this.adapter.plan(task.request, budget, signal, task.deviceId);
@@ -167,6 +186,8 @@ export class DeviceRuntimeRegistry {
       // Tokens/screenshots are ephemeral and never needed for finished executions.
       if (task.latest) { task.latest.visual = undefined; task.latest.assistance = undefined; }
       this.activeBySerial.delete(task.deviceId); this.changed();
+      this.activeByPhysical.delete(task.physicalId ?? task.deviceId);
+      await releaseReservation?.();
     }
   }
 }

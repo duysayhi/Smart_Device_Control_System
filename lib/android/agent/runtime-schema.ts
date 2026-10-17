@@ -12,6 +12,8 @@ export const RuntimeCommand = z.discriminatedUnion('type', [
 export type RuntimeCommandValue = z.infer<typeof RuntimeCommand>;
 export type ExecutionStatus = 'QUEUED' | 'RUNNING' | 'WAITING_HUMAN' | 'COMPLETED' | 'BLOCKED' | 'FAILED' | 'CANCELLED' | 'DISCONNECTED';
 export interface DeviceTask {
+  physicalId?: string;
+  connectionMode?: 'USB' | 'Wi-Fi';
   executionId: string; batchId: string; deviceId: string; request: string; status: ExecutionStatus;
   createdAt: number; finishedAt?: number; cancelRequested?: boolean; connectionState?: string;
   latest?: AgentProgress; events: AgentProgress[];

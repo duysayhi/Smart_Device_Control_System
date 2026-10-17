@@ -37,7 +37,7 @@ export function AgentGoalPanel({ text, onText, devices, serial, onSerial, onRefr
   const task = runtime.tasks.find(task => task.executionId === inspectedExecutionId && task.deviceId === serial) ?? currentTask, latest = task?.latest;
   const device = devices.find(device => device.serial === serial), busy = currentTask && !currentTask.finishedAt;
   const pendingAssistance = task?.status === 'WAITING_HUMAN' && latest?.assistance?.resumable && latest.visual?.status === 'HUMAN_REQUIRED' ? latest : undefined;
-  const selected = selectedDeviceIds.filter(id => devices.some(d => d.serial === id && d.status === 'device' && d.connectionType === 'USB'));
+  const selected = selectedDeviceIds.filter(id => devices.some(d => d.serial === id && d.status === 'device' && (d.connectionType === 'USB' || d.identityVerified)));
   const batchBlocked = selected.some(id => { const current = latestTasks.get(id); return current && !current.finishedAt; });
   useEffect(() => {
     if (!pendingAssistance) return;
@@ -70,7 +70,7 @@ export function AgentGoalPanel({ text, onText, devices, serial, onSerial, onRefr
       <button type="button" onClick={onRefresh} title="Làm mới thiết bị" aria-label="Làm mới thiết bị" className="p-2 border border-slate-200 rounded-md"><RefreshCw size={14} /></button>
     </div>
     <div className="flex flex-wrap gap-2">
-      <button type="button" onClick={() => void start([serial])} disabled={submitting || Boolean(busy) || !text.trim() || device?.status !== 'device' || device.connectionType !== 'USB'}
+      <button type="button" onClick={() => void start([serial])} disabled={submitting || Boolean(busy) || !text.trim() || device?.status !== 'device' || device.connectionType === 'Wi-Fi' && !device.identityVerified}
         className="flex gap-2 items-center justify-center bg-indigo-600 text-white rounded-md px-3 py-2 text-xs flex-1 disabled:opacity-50"><Play size={14} /> Chạy Agent</button>
       <button type="button" onClick={() => void start(selected)} disabled={submitting || selected.length < 2 || batchBlocked || !text.trim()}
         className="flex gap-2 items-center justify-center border border-slate-200 rounded-md px-3 py-2 text-xs disabled:opacity-50"><Layers size={14} /> Chạy nhóm ({selected.length})</button>

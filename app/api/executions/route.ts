@@ -44,9 +44,9 @@ export async function POST(request: Request) {
       { status: 404 }
     );
   }
-  if (targetDevice.connectionType !== 'USB') {
+  if (targetDevice.connectionType === 'Wi-Fi' && !targetDevice.identityVerified) {
     return Response.json(
-      { success: false, error: 'Executor hiện chỉ hỗ trợ thiết bị Android kết nối USB.' },
+      { success: false, error: 'Wireless device identity is unverified. Reconnect and verify physical identity first.' },
       { status: 400 }
     );
   }

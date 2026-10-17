@@ -279,6 +279,7 @@ export async function createAgentExecution(goal: AgentGoal, budget: AgentBudget,
   let activeCandidate: ActionCandidate | undefined;
   let executing = false;
   const execution = await createExecutionContext(serial, [{ type: 'OPEN_APP', app: goal.spec.app }], run, signal, {
+    executionId: budget.runtimeIdentity?.executionId,
     beforeSnapshot: source => budget.recordSnapshot(source), beforeScroll: () => budget.consume('scrolls'),
     onWebVerification: value => { budget.webVerification.push(value); if (budget.webVerification.length > 24) budget.webVerification.shift(); },
     onObservation: ms => { budget.timings.observationMs += ms; }, onVerification: ms => { budget.timings.verificationMs += ms; },

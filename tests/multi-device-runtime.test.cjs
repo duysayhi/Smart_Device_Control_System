@@ -96,6 +96,37 @@ test('SIMULATION: device error and reconnect never restart an unverified action 
   fake.reconnect(); await registry.refreshConnections(); assert.equal(registry.list()[0].status, 'DISCONNECTED');
   assert.equal(fake.instances.get('SIM-A').actions.length, 1);
 });
+
+test('SIMULATION: USB and Wi-Fi aliases are one scheduled physical device, not two independent Agents', async () => {
+  const gate = deferred(), fake = adapterFor({ gates: { 'SIM-A': gate } });
+  const usb = { ...devices[0], physicalId: 'same-phone', identityVerified: true };
+  const wifi = { ...usb, serial: '192.168.50.9:5555', connectionType: 'Wi-Fi' };
+  fake.adapter.discover = async () => [usb, wifi, devices[1]];
+  const registry = new DeviceRuntimeRegistry(fake.adapter);
+  await assert.rejects(start(registry, [{ deviceId: usb.serial, goal: 'Open Chrome' }, { deviceId: wifi.serial, goal: 'Open Chrome' }]), /same physical device/);
+  const [a] = await start(registry, [{ deviceId: usb.serial, goal: 'Open Chrome' }]);
+  await assert.rejects(start(registry, [{ deviceId: wifi.serial, goal: 'Open Chrome' }]), /Physical device already/);
+  const [b] = await start(registry, [{ deviceId: 'SIM-B', goal: 'Open Settings' }]);
+  await registry.settled(b.executionId); assert.equal(registry.list().find(task => task.executionId === b.executionId).status, 'COMPLETED');
+  gate.resolve(); await registry.settled(a.executionId); assert.equal(fake.instances.get(usb.serial).closed, 1);
+});
+
+test('SIMULATION: loss of Wi-Fi aborts only its execution; reconnect does not resume or switch to USB', async () => {
+  const serial = '192.168.50.9:5555', gate = deferred(), fake = adapterFor({ gates: { [serial]: gate } });
+  const wifi = { ...devices[0], serial, connectionType: 'Wi-Fi', identityVerified: true, physicalId: 'wifi-phone' };
+  const usbAlias = { ...devices[0], physicalId: 'wifi-phone', identityVerified: true };
+  let available = [wifi, usbAlias, devices[1]];
+  fake.adapter.discover = async () => available;
+  const registry = new DeviceRuntimeRegistry(fake.adapter);
+  const created = await start(registry, [{ deviceId: serial, goal: 'Open Chrome' }, { deviceId: 'SIM-B', goal: 'Open Settings' }]);
+  await until(() => fake.reached.has(serial));
+  available = [usbAlias, devices[1]]; await registry.refreshConnections();
+  await registry.settled(created[0].executionId); await registry.settled(created[1].executionId);
+  assert.equal(registry.list()[0].status, 'DISCONNECTED'); assert.equal(registry.list()[1].status, 'COMPLETED');
+  available = [wifi, usbAlias, devices[1]]; await registry.refreshConnections();
+  assert.equal(registry.list()[0].status, 'DISCONNECTED'); assert.equal(fake.instances.get(serial).actions.length, 1);
+  assert.equal(fake.instances.has(usbAlias.serial), false); assert.equal(fake.instances.get(serial).closed, 1);
+});
 test('SIMULATION: discovered disconnect aborts only its active runtime and restores no execution on reconnect', async () => {
   const gates = { 'SIM-A': deferred(), 'SIM-B': deferred() }, fake = adapterFor({ gates }), registry = new DeviceRuntimeRegistry(fake.adapter);
   const created = await start(registry, devices.map(d => ({ deviceId: d.serial, goal: 'Open Chrome' })));

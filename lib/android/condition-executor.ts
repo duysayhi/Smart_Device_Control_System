@@ -30,6 +30,7 @@ export interface ActionOutcome {
   interaction?: { method: string; resourceId: string; className: string; bounds: number[]; evidence: string[] };
 }
 export interface ExecutionAccounting {
+  executionId?: string;
   wifiOffConfirmed?: boolean;
   wifiOnConfirmed?: boolean;
   wifiNetworkConfirmed?: string;
@@ -273,6 +274,7 @@ export class ConditionExecutor {
           }
           postcondition = result.selection ? `Selected ${result.selection.itemType} result ${result.selection.ordinal} and destination content verified` : 'UI transition verified';
           if (snapshot.playback) postcondition = 'Selected video title matched Android Media Session; active playback position advanced';
+          if (snapshot.playback?.positionSource === 'ANDROID_PLAYBACK_CLOCK') postcondition = 'Selected video title matched Android Media Session; PLAYING confirmed across snapshots with advancing Android playback clock';
         } else {
           snapshot = await this.observer.read(15000, signal);
           verification = 'DISPATCHED';
@@ -364,7 +366,7 @@ export async function createExecutionContext(serial: string, actions: Action[], 
   if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(serial)) throw new AndroidExecutionError('CONFIG_ERROR', 'Invalid device serial.');
   const backend = process.env.ANDROID_EXECUTOR_BACKEND ?? 'appium';
   if (!['adb', 'appium'].includes(backend)) throw new AndroidExecutionError('CONFIG_ERROR', 'ANDROID_EXECUTOR_BACKEND must be appium or adb.');
-  const release = await acquireDeviceLock(serial);
+  const release = await acquireDeviceLock(serial, run);
   const legacy = createAndroidExecutor(run);
   let session: ManagedAppiumSession | undefined;
   let executor: ConditionExecutor | undefined;
@@ -376,6 +378,7 @@ export async function createExecutionContext(serial: string, actions: Action[], 
     if (backend === 'appium') {
       session = new ManagedAppiumSession(new AppiumClient(), serial, run);
       await session.open(signal);
+      await release.recordSession(session.sessionId!, accounting?.executionId);
       executor = new ConditionExecutor(session, run, accounting);
     }
   } catch (error) {

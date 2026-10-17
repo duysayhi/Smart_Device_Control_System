@@ -109,6 +109,7 @@ export class StateObserver {
     const deadline = performance.now() + timeoutMs;
     const remaining = () => Math.max(1, deadline - performance.now());
     await assertDeviceConnected(this.run, this.session.serial, remaining());
+    await this.session.assertPhysicalIdentity?.(signal, remaining());
     await this.hybrid.ensureNative(remaining(), signal);
     checkCancellation(signal);
     const foregroundPackage = await this.client.request<string>('GET', this.session.path + '/appium/device/current_package', undefined, remaining(), signal);
@@ -151,6 +152,7 @@ export class StateObserver {
     }
     const finalPackage = web ? await this.client.request<string>('GET', this.session.path + '/appium/device/current_package', undefined, remaining(), signal) : confirmedPackage;
     const consistent = finalPackage === foregroundPackage;
+    await this.session.assertPhysicalIdentity?.(signal, remaining());
     return { ...structured, observationStatus: consistent ? structured.observationStatus : 'UNKNOWN', observedAt: new Date(structured.timestamp).toISOString(),
       source: 'APPIUM', screen: consistent ? screen : 'UNKNOWN', nodes, viewport, ...(web && consistent ? { web } : {}) };
   }

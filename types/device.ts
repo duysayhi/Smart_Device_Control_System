@@ -16,6 +16,7 @@ export type ConnectionType = 'USB' | 'Wi-Fi';
 export type ScreenAppType = 'home' | 'youtube' | 'tiktok' | 'maps' | 'settings' | 'browser';
 
 export interface Device {
+  physicalId?: string;
   id: string;
   serial: string;
   name: string;
@@ -38,6 +39,11 @@ export interface Device {
 export type AndroidAdbStatus = 'device' | 'offline' | 'unauthorized' | 'unknown';
 
 export interface AndroidAdbDevice {
+  physicalId?: string;
+  identityVerified?: boolean;
+  busy?: boolean;
+  currentSessionId?: string;
+  currentExecutionId?: string;
   serial: string;
   model: string;
   status: AndroidAdbStatus;

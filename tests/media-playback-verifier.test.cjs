@@ -4,6 +4,7 @@ require.extensions['.ts'] = (m, f) => m._compile(ts.transpileModule(fs.readFileS
 const { readPlayingSession, createMediaPlaybackVerifier } = require('../lib/android/media-playback-verifier.ts');
 const { ConditionExecutor } = require('../lib/android/condition-executor.ts');
 const { verifyDiscoveredSelection } = require('../lib/android/action-verifier.ts');
+const { classifyScreen } = require('../lib/android/screen-state.ts');
 const pkg = 'com.google.android.youtube';
 const dump = (position = 1000, title = 'Any video title', state = 3, active = true, packageName = pkg) =>
   `    package=${packageName}\n    active=${active}\n    state=PlaybackState {state=${state}, position=${position}, buffered position=10000, speed=1.0, updated=${position}, actions=1}\n    metadata: size=6, description=${title}, Channel, Channel\n`;
@@ -28,6 +29,38 @@ test('requires two distinct post-click snapshots and advancing playback, preserv
   const s = after('third');
   assert.equal(await verify(selection, before, s, 5000), true);
   assert.equal(s.playback.source, 'ADB_MEDIA_SESSION'); assert.equal(s.playback.previousPositionMs, 1000);
+});
+
+test('empty watch metadata identifies a player destination but does not prove the selected title', () => {
+  const node = (id, bounds) => ({ resourceId: pkg + ':id/' + id, bounds, enabled: true, displayed: true,
+    text: '', description: '', clickable: false, focusable: true });
+  const nodes = [node('watch_player', [0, 83, 1080, 691]), node('video_metadata_layout', [0, 691, 1080, 2214])];
+  assert.equal(classifyScreen(pkg, nodes), 'VIDEO_PLAYER');
+  assert.equal(verifyDiscoveredSelection(selection, before, { ...after(), nodes }), false);
+  assert.notEqual(classifyScreen(pkg, nodes.slice(0, 1)), 'VIDEO_PLAYER');
+  assert.notEqual(classifyScreen(pkg, [...nodes, nodes[1]]), 'VIDEO_PLAYER');
+});
+
+test('constant PlaybackState baseline uses Android elapsed realtime with explicit clock evidence', async () => {
+  let uptime = 2;
+  const verify = createMediaPlaybackVerifier(async args => ({ stdout:
+    args.includes('dumpsys') ? dump(1000) : `${uptime} 1.00` }), 'serial');
+  assert.equal(await verify(selection, before, after('one'), 5000), false);
+  uptime = 3;
+  const current = after('two');
+  assert.equal(await verify(selection, before, current, 5000), true);
+  assert.equal(current.playback.positionSource, 'ANDROID_PLAYBACK_CLOCK');
+  assert.equal(current.playback.positionMs, 3000);
+  assert.equal(current.playback.previousPositionMs, 2000);
+});
+
+test('clock fallback rejects invalid timestamps, frozen clocks, paused or wrong media', async () => {
+  assert.equal(readPlayingSession(dump(), pkg, 999), undefined);
+  for (const output of [dump(), dump(1000, undefined, 2), dump(1000, 'Wrong video')]) {
+    const verify = createMediaPlaybackVerifier(async args => ({ stdout: args.includes('dumpsys') ? output : '2.0 1.0' }), 'serial');
+    assert.equal(await verify(selection, before, after('one'), 5000), false);
+    assert.equal(await verify(selection, before, after('two'), 5000), false);
+  }
 });
 test('wrong title, package, stale snapshot, inline preview, paused and unavailable metadata fail closed', async () => {
   for (const [output, old, current] of [

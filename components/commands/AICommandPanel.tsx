@@ -69,7 +69,7 @@ export const AICommandPanel: React.FC<AICommandPanelProps> = ({
 }) => {
   const [mode, setMode] = React.useState<'plan' | 'agent'>('agent');
   const selectedDevice = androidDevices.find((device) => device.serial === selectedAndroidSerial);
-  const targetCount = selectedDevice?.status === 'device' && selectedDevice.connectionType === 'USB' ? 1 : 0;
+  const targetCount = selectedDevice?.status === 'device' && (selectedDevice.connectionType === 'USB' || selectedDevice.identityVerified) ? 1 : 0;
 
   return (
     <div className="bg-white rounded-xl border border-slate-200 p-5 shadow-xs flex flex-col gap-4">

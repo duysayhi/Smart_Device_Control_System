@@ -10,6 +10,7 @@ import { useDashboardDemo } from '@/hooks/useDashboardDemo';
 import { useAgentRuntimes } from '@/hooks/useAgentRuntimes';
 import { useDevicePreviews } from '@/hooks/useDevicePreviews';
 import { latestDeviceTasks } from '@/lib/android/agent/runtime-schema';
+import { ConnectionManager } from '@/components/devices/ConnectionManager';
 
 export default function DashboardPage() {
   const [activeTab, setActiveTab] = React.useState('dashboard');
@@ -65,6 +66,7 @@ export default function DashboardPage() {
     >
       {/* 6. Statistics Cards – 4 Card tổng quan trạng thái */}
       <StatsOverview devices={liveDevices} />
+      <ConnectionManager devices={androidDevices} selectedSerial={selectedAndroidSerial} onSelect={focusDevice} onRefresh={refreshAndroidDevices} />
 
       {/* Khu vực giữa: Live Device Grid (65-70%) & AI Command Panel (30-35%) */}
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">

@@ -9,13 +9,21 @@ export function resolveLiveDeviceSelection(
     selectedAndroidSerial: string;
     selectedDeviceIds: string[];
 } {
-    const liveDevices: Device[] = devices.map((device) => ({
+    const groups = new Map<string, AndroidAdbDevice[]>();
+    for (const device of devices) {
+        const key = device.physicalId ?? device.serial;
+        groups.set(key, [...(groups.get(key) ?? []), device]);
+    }
+    const transports = [...groups.values()].map(group => group.find(d => d.serial === previousSelectedSerial && d.status === 'device') ??
+        group.find(d => d.status === 'device' && d.connectionType === 'USB') ?? group.find(d => d.status === 'device') ?? group[0]);
+    const liveDevices: Device[] = transports.map((device) => ({
+        physicalId: device.physicalId,
         id: device.serial,
         serial: device.serial,
         name: device.model,
         platform: 'android',
         osVersion: device.osVersion || 'Không có dữ liệu',
-        status: device.status === 'device'
+        status: device.status === 'device' && device.connectionType === 'Wi-Fi' && !device.identityVerified ? 'ERROR' : device.status === 'device'
             ? 'READY'
             : device.status === 'offline'
                 ? 'OFFLINE'
@@ -34,17 +42,19 @@ export function resolveLiveDeviceSelection(
 
     const retained = liveDevices.find((device) =>
         device.serial === previousSelectedSerial &&
-        device.status === 'READY' &&
-        device.connectionType === 'USB'
+        device.status === 'READY'
     );
     const nextSerial = retained?.serial ?? liveDevices.find((device) =>
-        device.status === 'READY' && device.connectionType === 'USB'
+        device.status === 'READY'
     )?.serial ?? '';
 
     return {
         devices: liveDevices,
         selectedAndroidSerial: nextSerial,
         selectedDeviceIds: previousSelectedIds === undefined ? (nextSerial ? [nextSerial] : []) :
-            previousSelectedIds.filter(id => liveDevices.some(device => device.id === id && device.status === 'READY' && device.connectionType === 'USB')),
+            [...new Set(previousSelectedIds.map(id => {
+                const old = devices.find(device => device.serial === id);
+                return liveDevices.find(device => device.status === 'READY' && (device.id === id || old?.physicalId && old.physicalId === device.physicalId))?.id;
+            }).filter((id): id is string => Boolean(id)))],
     };
 }
