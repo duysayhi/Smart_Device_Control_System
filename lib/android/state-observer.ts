@@ -13,6 +13,7 @@ import { isDescendant } from './exploration/scroll-regions';
 import type { ExplorationMetrics } from './exploration/types';
 import { resolveInteractionTarget } from './interaction-target-resolver';
 import { HybridContextObserver, withSessionContextLock, matchesNativeAddress, type HybridObservation } from './hybrid-context-observer';
+import type { MediaPlaybackEvidence } from './media-playback-verifier';
 
 export interface Observation extends ScreenSnapshot {
   observedAt: string;
@@ -22,17 +23,20 @@ export interface Observation extends ScreenSnapshot {
   nodes: UiNode[];
   viewport: Viewport;
   web?: HybridObservation;
+  playback?: MediaPlaybackEvidence;
 }
 export interface ObservationEvidence {
   observedAt: string; source: 'APPIUM' | 'ADB'; foregroundPackage?: string;
   screen?: AndroidScreenState; nodeCount?: number;
   snapshotId?: string; observationStatus?: ScreenSnapshot['observationStatus']; deviceSerial?: string;
   webStatus?: HybridObservation['status']; webContext?: string; webReason?: string; domSource?: 'WEB_CONTEXT';
+  playback?: MediaPlaybackEvidence;
 }
 export const observationEvidence = (snapshot: Observation): ObservationEvidence => ({
   observedAt: snapshot.observedAt, source: snapshot.source, foregroundPackage: snapshot.foregroundPackage,
   screen: snapshot.screen, nodeCount: snapshot.nodes.length,
   snapshotId: snapshot.snapshotId, observationStatus: snapshot.observationStatus, deviceSerial: snapshot.deviceSerial,
+  ...(snapshot.playback ? { playback: snapshot.playback } : {}),
   ...(snapshot.web ? { webStatus: snapshot.web.status, ...(snapshot.web.status === 'DOM_AVAILABLE'
     ? { webContext: snapshot.web.context, domSource: 'WEB_CONTEXT' as const } : { webReason: snapshot.web.reason }) } : {}),
 });
@@ -228,7 +232,7 @@ export class StateObserver {
     const index = fresh.nodes.indexOf(candidates[0]);
     return this.locate(fresh, `element:${fresh.elements[index].elementId}`, true, Math.max(1, timeoutMs - (performance.now() - started)), signal);
   }
-  waitUntil<T>(condition: (snapshot: Observation) => T | false, target: string, timeoutMs: number, signal?: AbortSignal, onProgress?: (value: ObserverProgress) => void): Promise<T> {
+  waitUntil<T>(condition: (snapshot: Observation, remainingMs: number) => T | false | Promise<T | false>, target: string, timeoutMs: number, signal?: AbortSignal, onProgress?: (value: ObserverProgress) => void): Promise<T> {
     return waitForObservation((remaining) => this.read(remaining, signal), condition, target, timeoutMs, signal, onProgress);
   }
   waitFor(target: string, timeoutMs: number, signal?: AbortSignal, onProgress?: (value: ObserverProgress) => void, forClick = false): Promise<LocatedElement> {

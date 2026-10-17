@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { queuedOllamaFetch } from '@/lib/android/agent/worker-client';
 import { androidCapabilityPrompt, validateAndroidPlan } from '@/lib/android/capabilities';
+import { planWifiOff, planWifiOn, planWifiNavigation, planWifiConnection } from '@/lib/android/wifi-plan';
 import {
   ActionPlanBaseSchema,
   ActionPlanSchema,
@@ -36,6 +37,11 @@ export async function POST(request: Request) {
       return Response.json({ success: false, error: 'ANDROID_EXECUTOR_BACKEND must be appium or adb.' }, { status: 500 });
     }
     const dynamicUi = backend === 'appium';
+    const wifiPlan = planWifiOff(input.data.prompt) ?? planWifiOn(input.data.prompt) ?? planWifiNavigation(input.data.prompt) ?? planWifiConnection(input.data.prompt);
+    if (wifiPlan) {
+      if (!dynamicUi) return Response.json({ success: false, error: 'Wi-Fi control requires Appium.' }, { status: 422 });
+      return Response.json({ success: true, actionPlan: wifiPlan });
+    }
     const timeoutMs = Number(process.env.OLLAMA_TIMEOUT_MS ?? 180000);
 
     // 2. Gọi Ollama

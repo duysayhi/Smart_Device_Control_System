@@ -20,6 +20,9 @@ export function verifyDiscoveredSelection(selection: DiscoveredSelection, before
   const title = canonicalUiText(selection.title);
   if (selection.itemType === 'video') {
     if (after.screen !== 'VIDEO_PLAYER') return false;
+    if (after.observationStatus === 'OBSERVED' && after.playback?.source === 'ADB_MEDIA_SESSION' &&
+      after.playback.packageName === after.foregroundPackage && canonicalUiText(after.playback.title) === title &&
+      after.playback.positionMs > after.playback.previousPositionMs) return true;
     const metadata = after.nodes.filter(n => n.resourceId.endsWith(':id/video_metadata_layout'));
     if (metadata.length > 1) return false;
     return after.nodes.some(n => n.enabled && n.displayed !== false && (metadata.length === 1

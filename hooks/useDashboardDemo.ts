@@ -212,12 +212,28 @@ export function useDashboardDemo() {
     })));
 
     try {
-      const response = await fetch('/api/executions', {
+      const payload = { deviceId: targetDevice.serial, actionPlan: validatedPlan.data };
+      let response = await fetch('/api/executions', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ deviceId: targetDevice.serial, actionPlan: validatedPlan.data }),
+        body: JSON.stringify(payload),
         signal: controller.signal,
       });
+      if (response.status === 409) {
+        const challenge = await response.clone().json().catch(() => null) as { confirmationRequired?: boolean; confirmationToken?: string; wifiEnabled?: boolean; wifiNetwork?: string } | null;
+        if (challenge?.confirmationRequired && challenge.confirmationToken) {
+          const message = challenge.wifiNetwork !== undefined
+            ? `Kết nối Wi-Fi “${challenge.wifiNetwork}” trên ${targetDevice.model} (${targetDevice.serial})? Wi-Fi sẽ được bật nếu cần. Nếu hỏi mật khẩu, nhập và bấm Kết nối trực tiếp trên điện thoại trong 2 phút. Không nhập mật khẩu vào câu lệnh.`
+            : challenge.wifiEnabled
+            ? `Bật Wi-Fi trên ${targetDevice.model} (${targetDevice.serial})? Điện thoại có thể tự kết nối mạng đã lưu.`
+            : `Tắt Wi-Fi trên ${targetDevice.model} (${targetDevice.serial})? Điện thoại sẽ mất kết nối Wi-Fi. Kết nối điều khiển USB vẫn được giữ.`;
+          if (!window.confirm(message)) {
+            setExecutionStatus('IDLE'); setExecutionSteps([]); return;
+          }
+          response = await fetch('/api/executions', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ ...payload, confirmationToken: challenge.confirmationToken }), signal: controller.signal });
+        }
+      }
       if (!response.ok) {
         const payload = await response.json().catch(() => null) as { error?: string } | null;
         throw new Error(payload?.error || 'Không thể bắt đầu thực thi trên thiết bị.');

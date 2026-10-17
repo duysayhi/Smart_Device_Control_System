@@ -13,6 +13,11 @@ import { explorationConfig, explorationGoal, type ExplorationMetrics } from './e
 import { assertPlanPolicy, assertActionNotSensitive, assertObservedControlSafe, unsafeBrowserInput } from './security-policy';
 import { withSessionContextLock } from './appium/session-operation-lock';
 import { VisualGroundingEngine, type HumanTapChoice } from './visual-grounding';
+import { createMediaPlaybackVerifier } from './media-playback-verifier';
+import { disableWifi, setWifiEnabled, openWifiSettings } from './wifi-control';
+import { connectWifiNetwork } from './wifi-network';
+import { wifiNetworkTarget } from './wifi-plan';
+import { developmentPolicyEnabled } from './policy-mode';
 
 export interface ActionOutcome {
   selection?: import('./exploration/types').DiscoveredSelection;
@@ -25,6 +30,9 @@ export interface ActionOutcome {
   interaction?: { method: string; resourceId: string; className: string; bounds: number[]; evidence: string[] };
 }
 export interface ExecutionAccounting {
+  wifiOffConfirmed?: boolean;
+  wifiOnConfirmed?: boolean;
+  wifiNetworkConfirmed?: string;
   beforeSnapshot?: (source?: string) => void; beforeScroll?: () => void;
   onWebVerification?: (value: { phase: string; urlMatches?: boolean; titleMatches?: boolean; ready?: boolean; pageError?: boolean; changed?: boolean }) => void;
   onObservation?: (ms: number) => void; onVerification?: (ms: number) => void;
@@ -48,6 +56,7 @@ export class ConditionExecutor {
   private readonly explorer: UIExplorer;
   private readonly scrollController: ScrollController;
   private readonly visual: VisualGroundingEngine;
+  private playbackCheck?: (snapshot: Observation, signal?: AbortSignal) => Promise<boolean>;
   constructor(private readonly session: ManagedAppiumSession, private readonly run: AdbRunner, private readonly accounting?: ExecutionAccounting) {
     this.observer = new StateObserver(session, run, accounting);
     this.visual = new VisualGroundingEngine(session, this.observer);
@@ -55,9 +64,13 @@ export class ConditionExecutor {
     this.scrollController = new ScrollController(session, this.observer, accounting?.beforeScroll);
     this.explorer = new UIExplorer(this.observer, this.scrollController);
   }
-  observe(signal?: AbortSignal): Promise<Observation> { return this.observer.read(15000, signal); }
+  async observe(signal?: AbortSignal): Promise<Observation> {
+    const snapshot = await this.observer.read(15000, signal);
+    await this.playbackCheck?.(snapshot, signal);
+    return snapshot;
+  }
   discoveryMemory() { return this.explorer.memorySummary(); }
-  dispose(): void { this.visual.dispose(); this.explorer.reset(); this.query = undefined; this.expectedPackage = undefined; }
+  dispose(): void { this.playbackCheck = undefined; this.visual.dispose(); this.explorer.reset(); this.query = undefined; this.expectedPackage = undefined; }
   async confirmVisualTap(choice: HumanTapChoice, plan: ActionPlan, signal?: AbortSignal): Promise<ActionOutcome> {
     return withSessionContextLock(this.session, async () => {
       const started = performance.now();
@@ -67,9 +80,12 @@ export class ConditionExecutor {
         return { verification: 'DISPATCHED', elapsedMs: Math.round(performance.now() - started), evidence: observationEvidence(after),
           postcondition: 'Human-confirmed grounded tap sent; no trusted destination verifier for this target' };
       }
-      const after = await this.observer.waitUntil(s => verifyDiscoveredSelection(result.selection, result.before, s) ? s : false,
+      const mediaVerify = createMediaPlaybackVerifier(this.run, this.session.serial);
+      const after = await this.observer.waitUntil(async (s, remaining) =>
+        verifyDiscoveredSelection(result.selection, result.before, s) || await mediaVerify(result.selection, result.before, s, remaining, signal) ? s : false,
         'human-confirmed selected destination', 30000, signal);
       this.accounting?.onVerifiedSnapshot?.(after);
+      if (after.playback) this.playbackCheck = (s, cancel) => mediaVerify(result.selection, result.before, s, 3000, cancel);
       this.explorer.reset();
       return { selection: result.selection, verification: 'VERIFIED', elapsedMs: Math.round(performance.now() - started), evidence: observationEvidence(after),
         postcondition: 'Human-confirmed grounded tap and selected destination verified',
@@ -83,6 +99,7 @@ export class ConditionExecutor {
   private async executeWithinContextLock(action: Action, signal?: AbortSignal, onProgress?: (value: ObserverProgress) => void): Promise<ActionOutcome> {
     assertActionNotSensitive(action);
     checkCancellation(signal);
+    this.playbackCheck = undefined;
     await this.session.ensureActive(signal);
     const start = performance.now();
     let snapshot: Observation | undefined;
@@ -163,6 +180,30 @@ export class ConditionExecutor {
         break;
       }
       case 'CLICK': {
+        if (action.target.startsWith('wifi_connect:')) {
+          const ssid = wifiNetworkTarget(action.target);
+          if (ssid === undefined || (!developmentPolicyEnabled() && this.accounting?.wifiNetworkConfirmed !== ssid)) throw new AndroidExecutionError('CONFIG_ERROR', 'Wi-Fi connection requires confirmation for this exact SSID and device.');
+          snapshot = await connectWifiNetwork(this.session, this.observer, this.explorer, this.run, ssid, signal, onProgress);
+          postcondition = `Android confirms connection to Wi-Fi ${ssid}; Internet access not verified`;
+          break;
+        }
+        if (action.target === 'wifi_on') {
+          if (!developmentPolicyEnabled() && !this.accounting?.wifiOnConfirmed) throw new AndroidExecutionError('CONFIG_ERROR', 'Wi-Fi on requires explicit device-bound confirmation.');
+          snapshot = await setWifiEnabled(this.session, this.observer, this.run, true, signal);
+          postcondition = 'Wi-Fi ON verified by native switch and Android wifi_on=1';
+          break;
+        }
+        if (action.target === 'wifi_settings') {
+          snapshot = await openWifiSettings(this.session, this.observer, this.run, signal);
+          postcondition = 'Wi-Fi settings page verified; no switch clicked';
+          break;
+        }
+        if (action.target === 'wifi_off') {
+          if (!developmentPolicyEnabled() && !this.accounting?.wifiOffConfirmed) throw new AndroidExecutionError('CONFIG_ERROR', 'Wi-Fi off requires explicit device-bound confirmation.');
+          snapshot = await disableWifi(this.session, this.observer, this.run, signal);
+          postcondition = 'Wi-Fi OFF verified by native switch and Android wifi_on=0';
+          break;
+        }
         if (/^(first_result|result_[1-9]\d?)$/.test(action.target)) {
           const before = await this.observer.read(20000, signal);
           if (this.expectedPackage && before.foregroundPackage !== this.expectedPackage) throw new AndroidExecutionError('UNKNOWN', 'Foreground app changed before web navigation.');
@@ -199,15 +240,22 @@ export class ConditionExecutor {
         } else await this.session.client.request('POST', this.session.path + `/element/${encodeURIComponent(found.id)}/click`, {}, 15000, signal);
         interaction = { method: found.interaction?.method ?? 'ELEMENT_CLICK', resourceId: found.node.resourceId, className: found.node.className,
           bounds: [...found.node.bounds], evidence: found.interaction?.evidence ?? ['unique observed native element'] };
-        const verify = (state: Observation) => this.accounting?.verifyAction?.(action, found.snapshot, state) ??
+        let policyVerification: boolean | undefined;
+        const verify = (state: Observation) => (policyVerification = this.accounting?.verifyAction?.(action, found.snapshot, state)) ??
           (result.selection ? verifyDiscoveredSelection(result.selection, found.snapshot, state) : verifyClickTransition(found.snapshot, state, action.target));
         if (verify(found.snapshot) !== undefined) {
           const verifyStarted = performance.now() - start;
           const verifyBudget = result.selection ? Math.max(1, explorationConfig().timeoutMs - verifyStarted) : 20000;
           const verifiedSnapshots = new Set<string>();
           const verificationStarted = performance.now();
+          const mediaVerify = createMediaPlaybackVerifier(this.run, this.session.serial);
           try {
-            snapshot = await this.observer.waitUntil((state) => verify(state) ? state : false, `postcondition:${action.target}`, verifyBudget, signal, progress => {
+            snapshot = await this.observer.waitUntil(async (state, remaining) => {
+              const verified = verify(state);
+              if (verified || (policyVerification === undefined && result.selection &&
+                await mediaVerify(result.selection, found.snapshot, state, remaining, signal))) return state;
+              return false;
+            }, `postcondition:${action.target}`, verifyBudget, signal, progress => {
               if (progress.evidence?.snapshotId) verifiedSnapshots.add(progress.evidence.snapshotId);
               onProgress?.({ ...progress, elapsedMs: Math.round(verifyStarted + progress.elapsedMs), exploration: { ...result.metrics,
                 snapshotCount: result.metrics.snapshotCount + verifiedSnapshots.size, phase: 'VERIFYING' } });
@@ -219,7 +267,12 @@ export class ConditionExecutor {
             throw error;
           } finally { this.accounting?.onVerification?.(Math.round(performance.now() - verificationStarted)); }
           exploration = { ...result.metrics, snapshotCount: result.metrics.snapshotCount + verifiedSnapshots.size };
+          if (snapshot.playback && result.selection) {
+            const selected = result.selection;
+            this.playbackCheck = (s, cancel) => mediaVerify(selected, found.snapshot, s, 3000, cancel);
+          }
           postcondition = result.selection ? `Selected ${result.selection.itemType} result ${result.selection.ordinal} and destination content verified` : 'UI transition verified';
+          if (snapshot.playback) postcondition = 'Selected video title matched Android Media Session; active playback position advanced';
         } else {
           snapshot = await this.observer.read(15000, signal);
           verification = 'DISPATCHED';

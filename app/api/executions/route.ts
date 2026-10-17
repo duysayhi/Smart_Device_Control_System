@@ -5,10 +5,15 @@ import { asAndroidError, checkCancellation } from '@/lib/android/errors';
 import { ActionPlanSchema } from '@/lib/validators/action-plan.schema';
 import { ExecutionStepResult, ExecutionStreamEvent } from '@/types/execution';
 import { assessPlanPolicy } from '@/lib/android/security-policy';
+import { isWifiOffPlan, isWifiOnPlan, wifiNetworkForPlan } from '@/lib/android/wifi-plan';
+import { issueWifiConfirmation, consumeWifiConfirmation } from '@/lib/android/wifi-confirmation';
+import { isLocalSameOrigin } from '@/lib/android/agent/request-origin';
+import { developmentPolicyEnabled } from '@/lib/android/policy-mode';
 
 const ExecutionRequestSchema = z.object({
   deviceId: z.string().min(1).max(128),
   actionPlan: ActionPlanSchema,
+  confirmationToken: z.string().uuid().optional(),
 });
 
 export async function POST(request: Request) {
@@ -54,12 +59,26 @@ export async function POST(request: Request) {
 
   const { deviceId, actionPlan } = parsed.data;
   const policy = assessPlanPolicy(actionPlan);
+  const wifiOff = isWifiOffPlan(actionPlan);
+  const wifiOn = isWifiOnPlan(actionPlan);
+  const wifiNetwork = wifiNetworkForPlan(actionPlan);
+  const wifiChange = wifiOff || wifiOn || wifiNetwork !== undefined;
+  if (wifiChange) {
+    if (!request.headers.get('origin') || !isLocalSameOrigin(request)) return Response.json({ success: false, error: 'Same-origin confirmation required.' }, { status: 403 });
+    if ((process.env.ANDROID_EXECUTOR_BACKEND ?? 'appium') !== 'appium') return Response.json({ success: false, error: 'Wi-Fi control requires Appium.' }, { status: 422 });
+    if (!developmentPolicyEnabled() && !parsed.data.confirmationToken) return Response.json({ success: false, confirmationRequired: true,
+      wifiEnabled: wifiOn, wifiNetwork, confirmationToken: issueWifiConfirmation(deviceId, actionPlan),
+      error: wifiNetwork !== undefined ? 'Connecting to this Wi-Fi network may change phone connectivity. Enter credentials only on the phone.' :
+        wifiOn ? 'Turning on Wi-Fi may reconnect this phone to saved networks.' : 'Turning off Wi-Fi disconnects wireless networking on this phone.' }, { status: 409 });
+    if (!developmentPolicyEnabled() && !consumeWifiConfirmation(parsed.data.confirmationToken!, deviceId, actionPlan)) return Response.json({ success: false, error: 'Confirmation expired, mismatched or already used.' }, { status: 409 });
+  }
   const cancellation = new AbortController();
   const signal = AbortSignal.any([request.signal, cancellation.signal, AbortSignal.timeout(300000)]);
   let execution: Awaited<ReturnType<typeof createExecutionContext>>;
   try {
-    assertNonSensitivePlan(actionPlan);
-    execution = await createExecutionContext(deviceId, actionPlan.actions, runAdb, signal);
+    if (developmentPolicyEnabled() || !wifiChange) assertNonSensitivePlan(actionPlan);
+    execution = await createExecutionContext(deviceId, actionPlan.actions, runAdb, signal,
+      wifiNetwork !== undefined ? { wifiNetworkConfirmed: wifiNetwork } : wifiOff ? { wifiOffConfirmed: true } : wifiOn ? { wifiOnConfirmed: true } : undefined);
   } catch (error) {
     const failure = asAndroidError(error);
     return Response.json({ success: false, error: failure.message, errorCode: failure.code, policy }, { status: failure.code === 'SESSION_ERROR' ? 409 : 422 });
