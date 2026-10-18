@@ -6,13 +6,13 @@ import { isSensitiveControl } from '../security-policy';
 import { matchUiTarget } from '../ui-understanding';
 import type { AgentBudget } from './budget';
 import type { AgentDecision, AgentGoal } from './schema';
-import { goalPackageAllowed, hasUnsavedInput, visibleNode } from './navigation-semantics';
+import { goalPackageAllowed, hasUnsavedInput, visibleNode, resolveRequiredCapability } from './navigation-semantics';
 import { criterionSatisfied } from './evaluator';
 import { generateActionCandidates } from './action-candidates';
 import { genericNativeGoal } from './native-navigation';
 
 export type SubtaskStatus = 'PENDING' | 'RUNNING' | 'SUSPENDED' | 'COMPLETED' | 'BLOCKED' | 'FAILED' | 'CANCELLED';
-type RecoveryKind = 'DISMISS_LAYER' | 'RESTORE_FOREGROUND' | 'WAIT_READY' | 'DISCOVER_TARGET';
+type RecoveryKind = 'DISMISS_LAYER' | 'RESTORE_FOREGROUND' | 'WAIT_READY' | 'DISCOVER_TARGET' | 'NAVIGATE_CAPABILITY';
 export interface SubtaskSpec {
   subtaskId: string; parentGoalId: string; parentSubtaskId?: string;
   triggerReason: string; triggerSnapshotId: string; fingerprint: string;
@@ -42,6 +42,7 @@ export class RecoveryManager {
   private missing = new Map<string, number>();
   private parentStatus: RecoveryProgress['parentStatus'] = 'RUNNING';
   get active() { return this.stack.at(-1); }
+  recordNavigationAttempt() { if (this.active?.objective === 'NAVIGATE_CAPABILITY') this.active.attempts++; }
   summary(): RecoveryProgress {
     const copy = (task: SubtaskSpec) => ({ ...task, layers: [...task.layers], allowedActionScope: [...task.allowedActionScope], recoveryBudget: { ...task.recoveryBudget } });
     const active = this.active && copy(this.active);
@@ -65,12 +66,13 @@ export class RecoveryManager {
     if (this.fingerprints.has(key) || this.stack.length >= budget.limits.recoveryDepth ||
       this.history.length >= budget.limits.recoverySubtasks) return false;
     budget.consume('recoverySubtasks');
-    const scope = kind === 'DISMISS_LAYER' ? ['PRESS_KEY'] : kind === 'RESTORE_FOREGROUND' ? ['OPEN_APP'] : ['WAIT_FOR'];
+    const scope = kind === 'NAVIGATE_CAPABILITY' ? ['CLICK', 'PRESS_KEY'].filter(action => goal.allowedActionScope.includes(action)) :
+      kind === 'DISMISS_LAYER' ? ['PRESS_KEY'] : kind === 'RESTORE_FOREGROUND' ? ['OPEN_APP'] : ['WAIT_FOR'];
     if (scope.some(action => !goal.allowedActionScope.includes(action))) return false;
     if (this.active) this.active.status = 'SUSPENDED';
     const task: SubtaskSpec = { subtaskId: randomUUID(), parentGoalId: goal.id, parentSubtaskId: this.active?.subtaskId,
       parentSubgoal: goal.currentSubgoal, triggerReason: reason, triggerSnapshotId: s.snapshotId, fingerprint: geometryFingerprint(s),
-      description: reason, objective: kind, completionCriteria: kind === 'DISMISS_LAYER' ? 'Observed obstructing layer removed in the same app.' :
+      description: reason, objective: kind, completionCriteria: kind === 'NAVIGATE_CAPABILITY' ? 'Required capability independently observed; resume unchanged parent criteria.' : kind === 'DISMISS_LAYER' ? 'Observed obstructing layer removed in the same app.' :
         kind === 'RESTORE_FOREGROUND' ? 'Authorized foreground app independently observed.' : 'Required target visible in a fresh ready snapshot.',
       allowedActionScope: scope, status: 'PENDING', attempts: 0, recoveryBudget: { timeMs: Math.min(budget.limits.recoveryTimeMs, budget.remaining()), attempts: budget.limits.recoveryAttempts },
       createdAt: Date.now(), target, layers: navigationLayers(s), hadDialog: dialog(s), elapsedMs: 0 };
@@ -104,7 +106,7 @@ export class RecoveryManager {
     // Child completion is verified before its suspended parent is reconsidered.
     while (this.active) {
       const task = this.active;
-      const complete = task.objective === 'RESTORE_FOREGROUND' ? s.foregroundPackage === goal.packageName :
+      const complete = task.objective === 'NAVIGATE_CAPABILITY' ? sameApp && resolveRequiredCapability(goal, s).ready : task.objective === 'RESTORE_FOREGROUND' ? s.foregroundPackage === goal.packageName :
         task.objective === 'DISMISS_LAYER' ? sameApp && geometryFingerprint(s) !== task.fingerprint &&
           (!task.hadDialog || !dialog(s)) && (!task.layers.length || !navigationLayers(s).includes(task.layers.at(-1)!)) :
           sameApp && !loading(s) && ready(task.target);
@@ -115,9 +117,11 @@ export class RecoveryManager {
     if (this.active && (Date.now() - this.active.createdAt >= this.active.recoveryBudget.timeMs ||
       goal.currentSubgoal !== this.active.parentSubgoal)) return block('Recovery deadline or suspended parent context is no longer valid.');
     if (!this.active && targetCriterion && criterionSatisfied(goal, targetCriterion, s) && !dialog(s) && !navigationLayers(s).length) return undefined;
+    const routes = sameApp ? generateActionCandidates(goal, s).filter(candidate => candidate.semanticRole === 'capability_navigation') : [];
     let kind: RecoveryKind | undefined, reason = '';
     if (sameApp && (dialog(s) || navigationLayers(s).length)) { kind = 'DISMISS_LAYER'; reason = 'Dismiss the observed non-sensitive obstruction, then verify removal.'; }
     else if (!sameApp && goal.currentSubgoal > 0) { kind = 'RESTORE_FOREGROUND'; reason = 'Restore the authorized app without replaying the interrupted interaction.'; }
+    else if (routes.length) { kind = 'NAVIGATE_CAPABILITY'; reason = `Navigate from observed UI toward ${resolveRequiredCapability(goal, s).name}; preserve the parent goal.`; }
     else if (sameApp && target && !genericNativeGoal(goal) && loading(s) && !ready(target)) { kind = 'WAIT_READY'; reason = 'Observe the loading condition until the required control is ready.'; }
     else if (sameApp && target && !genericNativeGoal(goal) && !ready(target) && targetCriterion?.kind === 'TARGET_VISIBLE') { kind = 'DISCOVER_TARGET'; reason = 'Discover the missing goal target using the existing bounded UI Explorer.'; }
     else if (!this.active && sameApp && target && !ready(target) && targetCriterion?.kind === 'SEARCH_RESULTS' &&
@@ -136,6 +140,7 @@ export class RecoveryManager {
     const task = this.active;
     if (!task) return undefined;
     if (task.attempts >= task.recoveryBudget.attempts) return block('Recovery attempt limit reached without independent completion evidence.');
+    if (task.objective === 'NAVIGATE_CAPABILITY') return undefined;
     // Never replay a mutation, even if an earlier child changed the layout.
     if (task.attempts && task.objective !== 'WAIT_READY') return block('Recovery action has no verified result; do not dispatch it again.');
     task.attempts++;

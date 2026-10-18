@@ -6,7 +6,7 @@ import { AndroidExecutionError, checkCancellation } from './errors';
 import { isSensitiveControl } from './security-policy';
 import { normalizeUiText } from './ui-understanding';
 import { withSessionContextLock } from './appium/session-operation-lock';
-import { matchesBrowserDestination, matchesBrowserResultTitle } from './browser-destination';
+import { matchesBrowserDestination, matchesBrowserResultTitle, resolveBrowserDestinationUrl } from './browser-destination';
 export { withSessionContextLock } from './appium/session-operation-lock';
 
 const WebLinkSchema = z.object({ selector: z.string().min(1), href: z.string().url(), url: z.string().url(), title: z.string().min(1),
@@ -36,13 +36,17 @@ export const READ_WEB_DOCUMENT = `return (() => {
     const styled = getComputedStyle(anchor); if (styled.display === 'none' || styled.visibility === 'hidden') continue;
     let ancestor = anchor, ad = false;
     while (ancestor && ancestor !== document.body) {
-      if (ancestor.matches('[data-text-ad],[data-ad],[aria-label="Sponsored"],[aria-label="Advertisement"]')) { ad = true; break; }
+      if (ancestor.matches('[data-text-ad],[data-ad],[data-impdclcc],[data-ad-slot],[aria-label="Sponsored"],[aria-label="Advertisement"]')) { ad = true; break; }
       const labels = Array.from(ancestor.querySelectorAll('span,[role="note"]')).filter(n => /^(Sponsored|Ad|Ads|Advertisement|Quảng cáo|Được tài trợ)$/i.test((n.textContent || '').trim()));
       if (labels.length) { const headingCount = ancestor.querySelectorAll('a h2,a h3,a [role="heading"]').length;
         if (headingCount > 1) ambiguousAds = true; else ad = true; break; }
       ancestor = ancestor.parentElement;
     }
     if (ad) continue;
+    // On the observed Google search layout, article cards carry an explicit source URL.
+    // Video cards and other rich modules must not consume article ordinals.
+    const searchPage = /(^|\\.)google\\.[a-z.]+$/.test(location.hostname) && location.pathname === '/search';
+    if (searchPage && !Array.from(anchor.querySelectorAll('[role="text"],cite')).some(n => /^https?:\\/\\//.test((n.textContent || '').trim()))) continue;
     let href, url; try { href = new URL(anchor.href, location.href); url = href;
       if (/(^|\\.)google\\.[a-z.]+$/.test(href.hostname) && href.pathname === '/url') url = new URL(href.searchParams.get('q') || href.searchParams.get('url') || href.href);
     } catch { continue; }
@@ -148,6 +152,10 @@ export class HybridContextObserver {
         const expected = observed.document.links[ordinal - 1], selected = before.links[ordinal - 1];
         if (!expected || !selected || expected.url !== selected.url || expected.title !== selected.title || expected.selector !== selected.selector) throw new AndroidExecutionError('AMBIGUOUS', 'Web result order or identity changed before interaction.');
         if (isSensitiveControl(selected.url) || isSensitiveControl(selected.title)) throw new AndroidExecutionError('CONFIG_ERROR', 'Selected web link has sensitive semantics; no click was sent.');
+        let destination: string;
+        try { destination = await resolveBrowserDestinationUrl(selected.url, signal); }
+        catch (error) { checkCancellation(signal); throw new AndroidExecutionError('UNKNOWN', 'The selected redirect has no verified destination; no article was clicked.', { cause: error }); }
+        if (isSensitiveControl(destination)) throw new AndroidExecutionError('CONFIG_ERROR', 'Resolved destination has sensitive semantics; no click was sent.');
         const rows = await this.session.client.request<AppiumElement[]>('POST', this.session.path + '/elements', { using: 'css selector', value: selected.selector }, remaining(), signal);
         if (rows.length !== 1) throw new AndroidExecutionError('AMBIGUOUS', 'DOM activation selector does not resolve uniquely.');
         const element = rows[0], id = element['element-6066-11e4-a52e-4f735466cecf'];
@@ -161,16 +169,16 @@ export class HybridContextObserver {
           !await this.session.client.request<boolean>('GET', path + '/enabled', undefined, remaining(), signal)) throw new AndroidExecutionError('AMBIGUOUS', 'Web element is no longer enabled/visible.');
         checkCancellation(signal);
         await this.session.client.request('POST', path + '/click', {}, remaining(), signal);
-        const expectedUrl = new URL(selected.url);
+        const expectedUrl = new URL(destination);
         let previousState = '', unchanged = 0;
         while (performance.now() - started < timeoutMs) {
           const after = await read('DOM_VERIFY'), actual = new URL(after.url);
-          const titleMatches = matchesBrowserResultTitle(selected.title, selected.url, after);
+          const titleMatches = matchesBrowserResultTitle(selected.title, destination, after);
           const pageError = /\b(?:404|403|500|not found|access denied|captcha|unavailable)\b/.test(normalizeUiText(after.title));
           this.accounting?.onWebVerification?.({ phase: 'DESTINATION', urlMatches: matchesBrowserDestination(expectedUrl.href, after),
             titleMatches, ready: after.readyState === 'complete', pageError, changed: actual.href !== before.url });
           if (matchesBrowserDestination(expectedUrl.href, after) && after.readyState === 'complete' &&
-            !pageError && titleMatches && actual.href !== before.url) return { title: after.title, selectedTitle: selected.title, url: selected.url, finalUrl: after.url };
+            !pageError && titleMatches && actual.href !== before.url) return { title: after.title, selectedTitle: selected.title, url: destination, finalUrl: after.url };
           const signature = JSON.stringify([after.url, after.title, after.headings, after.readyState]);
           unchanged = signature === previousState ? unchanged + 1 : 0; previousState = signature;
           await delay(Math.min(1000, 250 * 2 ** Math.min(unchanged, 2), remaining()), undefined, { signal }).catch(() => checkCancellation(signal));

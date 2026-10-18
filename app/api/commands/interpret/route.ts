@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { queuedOllamaFetch } from '@/lib/android/agent/worker-client';
-import { androidCapabilityPrompt, validateAndroidPlan } from '@/lib/android/capabilities';
+import { androidCapabilityPrompt, validateAndroidPlan, planChromeCommand } from '@/lib/android/capabilities';
 import { planWifiOff, planWifiOn, planWifiNavigation, planWifiConnection } from '@/lib/android/wifi-plan';
 import {
   ActionPlanBaseSchema,
@@ -41,6 +41,16 @@ export async function POST(request: Request) {
     if (wifiPlan) {
       if (!dynamicUi) return Response.json({ success: false, error: 'Wi-Fi control requires Appium.' }, { status: 422 });
       return Response.json({ success: true, actionPlan: wifiPlan });
+    }
+    try {
+      const chromePlan = planChromeCommand(input.data.prompt);
+      if (chromePlan) {
+        if (!dynamicUi) return Response.json({ success: false, error: 'Chrome search/result navigation requires Appium.' }, { status: 422 });
+        validateAndroidPlan(chromePlan.actions, true);
+        return Response.json({ success: true, actionPlan: chromePlan });
+      }
+    } catch (error) {
+      return Response.json({ success: false, error: error instanceof Error ? error.message : 'Invalid browser request.' }, { status: 422 });
     }
     const timeoutMs = Number(process.env.OLLAMA_TIMEOUT_MS ?? 180000);
 
@@ -99,8 +109,9 @@ a) Coi cả câu lệnh là một quy trình liên tục. Sau OPEN_APP, app vẫ
    Mỗi app chỉ OPEN_APP tối đa một lần, ở đầu kế hoạch.
    Chỉ OPEN_APP lại khi người dùng yêu cầu chuyển sang app khác.
 b) Không có hai action liên tiếp giống hệt nhau.
-c) Muốn nhập chữ: phải CLICK search_button trước INPUT_TEXT.
-d) Sau INPUT_TEXT tìm kiếm: PRESS_KEY ENTER, rồi WAIT_FOR video_list.
+c) Muốn nhập chữ: YouTube CLICK search_button; Chrome CLICK address_bar trước INPUT_TEXT.
+d) Sau INPUT_TEXT tìm kiếm: PRESS_KEY ENTER. YouTube dùng WAIT_FOR video_list;
+   Chrome xác minh kết quả sau ENTER và dùng first_result hoặc result_N khi được yêu cầu. Không dùng video_list cho Chrome.
 e) WAIT_FOR chỉ đặt ngay trước CLICK đầu tiên trên một màn hình mới
    (sau mở app, sau ENTER tìm kiếm, sau khi chọn video).
    WAIT_FOR đúng phần tử sắp được CLICK. Không đặt WAIT_FOR sau mọi bước.
@@ -113,6 +124,7 @@ target:
 - video_card_N (video thứ N trong danh sách; giới hạn theo danh mục executor bên dưới)
 - subscribe_button, like_button, comment_button
 - play_button, back_button
+- Chrome Appium: address_bar, first_result, result_1..99 (bài viết/kết quả thứ N).
 Không tự bịa app hoặc target. Phần yêu cầu nằm ngoài danh mục thì bỏ qua,
 chỉ tạo các bước nằm trong danh mục.
 

@@ -75,4 +75,10 @@ export interface AgentProgress {
   failure?: { code: string; message: string };
   visual?: import('../visual-grounding').VisualSummary;
   recovery?: import('./recovery').RecoveryProgress;
+  currentScreen?: import('./navigation-semantics').CurrentScreenState;
+  navigation?: {
+    required: import('./navigation-semantics').RequiredCapability; phase: 'NAVIGATING' | 'READY' | 'MAIN_GOAL' | 'BLOCKED';
+    candidates: { id: string; action: string; outcome: string }[]; lastAction?: string; verification?: string;
+    actionCount: number; recognitionMs: number; navigationMs: number;
+  };
 }

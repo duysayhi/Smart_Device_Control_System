@@ -119,3 +119,17 @@ export function assessObservedReadNavigation(snapshot: Observation, node: UiNode
   return { decision: trusted ? 'ALLOW' : 'BLOCK', risks: [trusted ? 'NAVIGATION' : 'UNKNOWN'], llmDisagreement: false,
     reasons: [trusted ? 'Observed unique control has goal-related read/search navigation semantics and no data-changing descendants.' : 'Observed control does not prove read-only goal navigation.'] };
 }
+
+export function assessObservedRouteControl(snapshot: Observation, node: UiNode): PolicyDecision {
+  const label = normalizeUiText(node.description || node.text);
+  const approved = /^(navigate up|back|quay lai|dieu huong len|tro ve|more options|more|menu|tuy chon khac|lua chon khac|exit full screen|exit fullscreen|thoat toan man hinh)$/.test(label);
+  const match = [node.description && `accessibility_id:${node.description}`, node.text && `text:${node.text}`, node.resourceId && `id:${node.resourceId}`]
+    .filter(Boolean).map(target => matchUiTarget(snapshot, target as string, true)).find(result => result.status === 'MATCH');
+  const owner = match?.node;
+  const trusted = snapshot.observationStatus === 'OBSERVED' && node.packageName === snapshot.foregroundPackage && node.enabled && node.displayed !== false && approved &&
+    !snapshot.nodes.some(n => /permissioncontroller|packageinstaller/.test(n.packageName) || /WebView/.test(n.className) && isDescendant(snapshot.nodes, node, n)) &&
+    Boolean(owner && !snapshot.nodes.some(n => isDescendant(snapshot.nodes, n, owner) &&
+      (/Switch|CheckBox|RadioButton|ToggleButton|EditText/.test(n.className) || isSensitiveControl(n.text + ' ' + n.description + ' ' + n.resourceId))));
+  return { decision: trusted ? 'ALLOW' : 'BLOCK', risks: [trusted ? 'NAVIGATION' : 'UNKNOWN'], llmDisagreement: false,
+    reasons: [trusted ? 'Unique native reversible navigation control; goal-specific route grounding is still required.' : 'Unproven native route control.'] };
+}

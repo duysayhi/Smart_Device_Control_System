@@ -29,6 +29,19 @@ export function RecoveryProgressView({ recovery }: { recovery: NonNullable<Agent
     {recovery.parentStatus === 'RUNNING' && <p>Đã xác minh recovery, tiếp tục mục tiêu chính.</p>}
   </div>;
 }
+export function NavigationProgressView({ event }: { event: AgentProgress }) {
+  if (!event.currentScreen || !event.navigation) return null;
+  const state = event.currentScreen, navigation = event.navigation;
+  return <div aria-label="Current screen navigation" className="border-l-2 border-cyan-500 pl-2 space-y-1 break-words">
+    <p className="font-medium">{state.screenType} · {state.confidence}</p>
+    <p>{state.foregroundPackage}{state.foregroundActivity ? ` · ${state.foregroundActivity}` : ''}</p>
+    <p>Chức năng cần đạt: {navigation.required.name} · {navigation.required.ready ? 'Sẵn sàng' : 'Chưa sẵn sàng'}</p>
+    <p>{navigation.phase === 'NAVIGATING' ? 'Đang điều hướng' : navigation.phase === 'BLOCKED' ? 'Cần hỗ trợ điều hướng' : 'Thực hiện mục tiêu chính'}</p>
+    {navigation.lastAction && <p>{navigation.lastAction} · {navigation.verification}</p>}
+    {state.activeOverlay && <p>Lớp phủ: {state.activeOverlay}</p>}
+    <p className="text-slate-500">{navigation.actionCount} bước điều hướng · {(navigation.navigationMs / 1000).toFixed(1)} s · Nhận diện {navigation.recognitionMs} ms</p>
+  </div>;
+}
 export function AgentGoalPanel({ text, onText, devices, serial, onSerial, onRefresh, selectedDeviceIds, runtime, inspectedExecutionId }: Props) {
   const [error, setError] = useState<{ deviceId: string; message: string }>(), [submitting, setSubmitting] = useState(false);
   const [point, setPoint] = useState<{ x: number; y: number; evidenceId: string }>();
@@ -92,6 +105,7 @@ export function AgentGoalPanel({ text, onText, devices, serial, onSerial, onRefr
       <p className="font-semibold">{task.deviceId} · {task.status}</p><p>{task.request}</p>
       <p className="text-slate-600">{latest?.subgoal}</p><p>{latest?.reason}</p>
       <p className="text-slate-500">{latest?.foregroundPackage} · {latest?.screen}</p>
+        {latest && <NavigationProgressView event={latest} />}
       {latest?.failure && task.status !== 'COMPLETED' && <p className="text-amber-700">{latest.failure.code}: {latest.failure.message}</p>}
       {latest?.recovery && <RecoveryProgressView recovery={latest.recovery} />}
       {latest?.counters && <p className="text-slate-500">{latest.verifiedSubgoals}/{latest.totalSubgoals} mục tiêu con · {latest.counters.steps} bước · {latest.counters.snapshots} snapshot · {latest.counters.scrolls} cuộn · {latest.counters.reasoning} AI</p>}

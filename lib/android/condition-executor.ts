@@ -209,6 +209,9 @@ export class ConditionExecutor {
           const before = await this.observer.read(20000, signal);
           if (this.expectedPackage && before.foregroundPackage !== this.expectedPackage) throw new AndroidExecutionError('UNKNOWN', 'Foreground app changed before web navigation.');
           if (before.web?.status === 'DOM_AVAILABLE') {
+            const url = new URL(before.web.document.url);
+            const query = this.query ?? url.searchParams.get('q') ?? url.searchParams.get('query');
+            if (!query || !verifyBrowserSearch(before, query)) throw new AndroidExecutionError('UNKNOWN', 'A verified current browser search-result list is required; no article was clicked.');
             const ordinal = action.target === 'first_result' ? 1 : Number(action.target.slice(7));
             const result = await this.observer.hybrid.clickOrdinal(before.web, ordinal, Math.min(explorationConfig().timeoutMs, 30000), signal);
             snapshot = await this.observer.read(20000, signal);
@@ -310,6 +313,11 @@ export class ConditionExecutor {
         const before = await this.observer.read(15000, signal);
         checkCancellation(signal);
         this.accounting?.beforeKey?.(action, before);
+        if (action.key === 'ENTER') {
+          const inputs = before.nodes.filter(n => n.packageName === before.foregroundPackage && n.enabled && n.displayed !== false && n.focused &&
+            /EditText|AutoCompleteTextView/.test(n.className) && /search|query|url_bar|omnibox|address/.test(n.resourceId));
+          if (inputs.length === 1) this.query = inputs[0].text;
+        }
         await this.legacy.execute(this.session.serial, action);
         this.explorer.reset();
         if (action.key === 'ENTER' && before.screen === 'SEARCH_INPUT' && this.query) {

@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { GoalSpecSchema, GoalSchema, type AgentGoal, type GoalSpec, type Criterion } from './schema';
-import { resolveAppPackage, APP_PACKAGE_ALIASES } from '../capabilities';
+import { resolveAppPackage, APP_PACKAGE_ALIASES, parseChromeRequest } from '../capabilities';
 import { isSensitiveControl, assessPlanPolicy } from '../security-policy';
 import { normalizeUiText } from '../ui-understanding';
 import { AgentBudget } from './budget';
@@ -9,6 +9,9 @@ import { AndroidExecutionError } from '../errors';
 import { bindDiscoveredApplication, isVerifiedApplication, type DiscoveredApplication } from './application-discovery';
 
 function clearGoal(request: string): GoalSpec | undefined {
+  const chrome = parseChromeRequest(request);
+  if (chrome?.query) return { app: 'chrome', operation: chrome.ordinal ? 'OPEN_RESULT' : 'SEARCH', query: chrome.query,
+    resultType: 'browser', ...(chrome.ordinal ? { ordinal: chrome.ordinal } : {}), isSensitive: false };
   const read = request.match(/^mở\s+(settings|cài đặt)\s+và\s+xem\s+(.+?)\.?$/i);
   if (read) return { app: 'settings', operation: 'FIND_PLACE', targetText: read[2], isSensitive: false };
   const implicit = request.match(/^tìm(?:\s+kiếm)?\s+(.+?)\s+(?:và|rồi)\s+(mở|phát)\s+(bài(?:\s+hướng dẫn)?|kết quả|video(?:\s+thông thường)?)\s+(đầu tiên|thứ hai|thứ ba|thứ tư|thứ\s+\d+)(?:\s+phù hợp)?\.?$/i);
@@ -70,7 +73,7 @@ export function buildGoal(request: string, candidate: GoalSpec, budget: AgentBud
   const goal = GoalSchema.parse({ id: randomUUID(), originalRequest: request, description: request, spec, packageName,
     currentSubgoal: 0, subgoals: criteria.map((criterion, i) => ({ id: `subgoal-${i}`, description: criterion.kind === 'FOREGROUND' ? `Mở ${spec.app}` :
       criterion.kind === 'SEARCH_RESULTS' ? `Xác minh kết quả: ${spec.query}` : criterion.kind === 'NATIVE_PAGE' ? `Mở trang ${spec.targetText}` : ['TARGET_VISIBLE', 'READ_LOCATION'].includes(criterion.kind) ? `Tìm ${spec.targetText}` : `Xác minh nội dung thứ ${spec.ordinal}`, criterion, status: 'PENDING' })),
-    allowedActionScope: ['OPEN_APP', 'WAIT_FOR', 'PRESS_KEY', ...(['SEARCH', 'OPEN_RESULT', 'FIND_PLACE'].includes(spec.operation) ? ['CLICK', 'INPUT_TEXT'] : spec.operation === 'OPEN_PAGE' ? ['CLICK'] : []), ...(['FIND_PLACE', 'FIND_ELEMENT', 'OPEN_PAGE'].includes(spec.operation) ? ['SWIPE'] : [])],
+    allowedActionScope: ['OPEN_APP', 'WAIT_FOR', 'PRESS_KEY', ...(['SEARCH', 'OPEN_RESULT', 'FIND_PLACE'].includes(spec.operation) ? ['CLICK', 'INPUT_TEXT'] : ['OPEN_PAGE', 'FIND_ELEMENT'].includes(spec.operation) ? ['CLICK'] : []), ...(['FIND_PLACE', 'FIND_ELEMENT', 'OPEN_PAGE'].includes(spec.operation) ? ['SWIPE'] : [])],
     limits: budget.limits, safetyRequirements: ['Independent policy ALLOW', 'Fresh native/DOM validation', 'No sensitive actions', 'Verified goal criteria', 'No screenshot AI without an approved Vision adapter'] });
   if (application) bindDiscoveredApplication(goal, application);
   return goal;
