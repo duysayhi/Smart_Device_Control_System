@@ -1,0 +1,12 @@
+[
+  {
+    "id": "photos",
+    "goal": "Xin truy cap com.google.android.apps.photos va loc \"20261019_154525.jpg\"",
+    "approval": "OPEN_APP: com.google.android.apps.photos; SEARCH: \"20261019_154525.jpg\""
+  },
+  {
+    "id": "drive",
+    "goal": "Xin truy cap com.google.android.apps.docs va loc \"coastal research archive\"",
+    "approval": "OPEN_APP: com.google.android.apps.docs; SEARCH: \"coastal research archive\""
+  }
+]

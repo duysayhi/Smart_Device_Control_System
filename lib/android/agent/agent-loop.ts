@@ -7,7 +7,7 @@ import { assertPlanPolicy, assessPlanPolicy, isSensitiveControl, assessObservedR
 import { AgentBudget, AgentLimitError } from './budget';
 import { AgentMemory } from './memory';
 import { AgentDecisionEngine, currentTarget, searchTarget } from './decision-engine';
-import { criterionSatisfied } from './evaluator';
+import { criterionSatisfied, goalRequiresPlayback } from './evaluator';
 import { DecisionSchema, type AgentDecision, type AgentGoal, type AgentProgress } from './schema';
 import { navigationLayers } from '../browser-navigation';
 import { geometryFingerprint } from '../visual-grounding';
@@ -21,6 +21,7 @@ import { RecoveryManager, recoverySensitive } from './recovery';
 import { discoveredApplication } from './application-discovery';
 import { genericNativeGoal, nativeContextSafe, nativeReadControl, applicationUiBlocked } from './native-navigation';
 import { resolveAppPackage } from '../capabilities';
+import { assertSafeSource, assertSafeAction } from '../safety-envelope';
 
 export interface AgentExecution {
   deviceId?: string;
@@ -39,6 +40,7 @@ class AgentPolicyError extends Error {
   constructor(message: string, readonly category: 'SENSITIVE_ACTION' | 'UNKNOWN_UI' = 'UNKNOWN_UI') { super(message); }
 }
 export function policyForAgentAction(goal: AgentGoal, action: Action, snapshot: Observation, candidate?: ActionCandidate): ActionPlan {
+  assertSafeSource(goal.originalRequest); assertSafeAction(action);
   const blockedUi = applicationUiBlocked(goal, snapshot);
   if (blockedUi) throw new AgentPolicyError(blockedUi);
   if (recoverySensitive(snapshot) || snapshot.nodes.some(n => /permissioncontroller|packageinstaller/.test(n.packageName) ||
@@ -138,6 +140,7 @@ export async function runAgent(goal: AgentGoal, budget: AgentBudget, execution: 
     terminal = emit('BLOCKED', reason, { assistance: { category, resumable: false, sessionRetained: false, expiresAt: Date.now() + 120000, evidenceId: visual?.id }, visual });
   };
   try {
+    assertSafeSource(goal.originalRequest);
     if (execution.backend !== 'appium') throw new Error('Agent requires the Appium observation backend.');
     while (!terminal) {
       checkCancellation(signal); budget.consume('iterations');
@@ -328,6 +331,7 @@ export async function createAgentExecution(goal: AgentGoal, budget: AgentBudget,
   let activeCandidate: ActionCandidate | undefined;
   let executing = false;
   const execution = await createExecutionContext(serial, [{ type: 'OPEN_APP', app: goal.spec.app }], run, signal, {
+    requirePlayback: goalRequiresPlayback(goal),
     executionId: budget.runtimeIdentity?.executionId,
     beforeSnapshot: source => budget.recordSnapshot(source), beforeScroll: () => budget.consume('scrolls'),
     onWebVerification: value => { budget.webVerification.push(value); if (budget.webVerification.length > 24) budget.webVerification.shift(); },

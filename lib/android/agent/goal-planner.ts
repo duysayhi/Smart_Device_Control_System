@@ -7,6 +7,8 @@ import { AgentBudget } from './budget';
 import { OllamaAgentReasoner, type JsonReasoner } from './ollama';
 import { AndroidExecutionError } from '../errors';
 import { bindDiscoveredApplication, isVerifiedApplication, type DiscoveredApplication } from './application-discovery';
+import { assertLegacyCoverage, legacyActionWords } from './outcome-spec';
+import { assertSafeSource } from '../safety-envelope';
 
 function clearGoal(request: string): GoalSpec | undefined {
   const chrome = parseChromeRequest(request);
@@ -41,12 +43,13 @@ export function buildGoal(request: string, candidate: GoalSpec, budget: AgentBud
   const packageName = application?.packageName ?? resolveAppPackage(parsed.app);
   const spec = { ...parsed, app: Object.entries(APP_PACKAGE_ALIASES).find(([, value]) => value === packageName)?.[0] ?? (application ? packageName : parsed.app) };
   const original = normalizeUiText(request);
+  const actionWords = legacyActionWords(request, application?.requestedName ?? parsed.app, [spec.query ?? '', spec.targetText ?? '']);
   if (application && !Object.values(APP_PACKAGE_ALIASES).includes(packageName) && !original.includes(normalizeUiText(application.requestedName))) throw new Error('Planner changed the requested application.');
+  assertLegacyCoverage(request, spec.operation, application?.requestedName ?? parsed.app);
   if (application && ['OPEN_APP', 'OPEN_PAGE', 'FIND_ELEMENT'].includes(spec.operation) &&
-    /\b(chup|screenshot|gui|send|xoa|delete|thanh toan|payment|purchase|reset|uninstall|tao|them)\b/.test(original)) throw new Error('Capture, send, create and data-changing outcomes are not supported by native read navigation.');
+    /\b(chup|screenshot|gui|send|xoa|delete|thanh toan|payment|purchase|reset|uninstall|tao|them)\b/.test(actionWords)) throw new Error('Capture, send, create and data-changing outcomes are not supported by native read navigation.');
   if (spec.operation === 'FIND_PLACE' && /\bva xem\b/.test(original) && /\bbo nho\b/.test(original) && !/\b(luu tru|storage|ram)\b/.test(original)) throw new AndroidExecutionError('CONFIG_ERROR', 'Cần làm rõ: bạn muốn xem RAM hay dung lượng lưu trữ?');
   if (spec.operation === 'FIND_PLACE' && !/\b(tim noi xem|va xem)\b/.test(original)) throw new Error('Planner invented an information-location outcome.');
-  const actionWords = spec.query ? original.replace(normalizeUiText(spec.query), '') : spec.targetText ? original.replace(normalizeUiText(spec.targetText), '') : original;
   if (/\b(tat|dong|close|thay doi|doi|bat|toggle|chup|screenshot|gui|send|download|tai ve|share|chia se)\b/.test(actionWords)) throw new Error('Requested outcomes are outside the supported read/navigation goal types.');
   if (spec.operation === 'OPEN_RESULT' && (!/\b(tim|search|tra cuu)\b/.test(original) || !/\b(mo|phat|chon|xem|open|play|select)\s+(ket qua|video|bai|result)\b/.test(original))) throw new Error('Planner invented a search/selection outcome.');
   if (spec.operation === 'SEARCH' && (/\b(mo|phat|chon|xem|open|play|select)\s+(ket qua|video|bai|result)\b/.test(original) || !/\b(tim|search|tra cuu)\b/.test(original))) throw new Error('Search-only planning cannot drop a requested selection or invent a search.');
@@ -80,7 +83,8 @@ export function buildGoal(request: string, candidate: GoalSpec, budget: AgentBud
 }
 export async function planGoal(request: string, budget: AgentBudget, reasoner: JsonReasoner = new OllamaAgentReasoner(), signal?: AbortSignal,
   discover?: (app: string) => Promise<DiscoveredApplication>) {
-  request = request.trim();
+    request = request.trim();
+    assertSafeSource(request);
   if (!request || request.length > 2000 || isSensitiveControl(request)) throw new Error('Invalid or sensitive goal; explicit authorization is required.');
   const generic = discover && request.match(/^mở\s+(?:ứng dụng\s+)?([^,]+?)(?:\s+và\s+(tìm(?:\s+mục)?|mở(?:\s+trang)?|xem)\s+(.+?))?\.?$/i);
   const genericSpec: GoalSpec | undefined = generic && !/\b(?:va|roi|and|then)\b/.test(normalizeUiText(generic[1])) ? {

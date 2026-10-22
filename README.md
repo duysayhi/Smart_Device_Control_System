@@ -10,6 +10,8 @@ USB/Wi-Fi hybrid connectivity: [Setup, security, reconnect and acceptance](docs/
 
 Goal Agent state-aware navigation: [Behavior, verification and acceptance](docs/state-aware-navigation.md).
 
+Agent V2 owner-authorized, non-destructive testing: [Setup, scope and real-device acceptance](docs/owner-authorized-test-mode.md).
+
 - [1. Các thành phần cần tải](#1-các-thành-phần-cần-tải)
 - [2. Cài Node.js và dependency](#2-cài-nodejs-và-dependency)
 - [3. Cài ADB và kết nối Android](#3-cài-adb-và-kết-nối-android)

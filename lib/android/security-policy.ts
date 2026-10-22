@@ -7,6 +7,7 @@ import { AndroidExecutionError } from './errors';
 import { APP_PACKAGE_ALIASES } from './capabilities';
 import { isWifiOffPlan, isWifiOnPlan, wifiNetworkForPlan } from './wifi-plan';
 import { developmentPolicyEnabled } from './policy-mode';
+import { forbiddenControl } from './safety-envelope';
 
 export type ActionRisk = 'NAVIGATION' | 'READ' | 'DATA_CHANGE' | 'SENSITIVE' | 'UNKNOWN';
 export interface PolicyDecision {
@@ -16,10 +17,10 @@ export interface PolicyDecision {
   llmDisagreement: boolean;
 }
 export function isDestructiveControl(value: string): boolean {
-  return /(?:^|[\s/:.])(delete|xoa|reset|factory reset|uninstall|go cai dat|khoi phuc cai dat goc|dat lai thiet bi|erase|wipe|format|clear data|clear cache|don dep|don ngay|clean now)(?:$|\s|button)/.test(normalizeUiText(value));
+  return forbiddenControl(value) || /(?:^|[\s/:.])(delete|xoa|reset|factory reset|uninstall|go cai dat|khoi phuc cai dat goc|dat lai thiet bi|erase|wipe|format|clear data|clear cache|don dep|don ngay|clean now)(?:$|\s|button)/.test(normalizeUiText(value));
 }
-export function isSensitiveControl(value: string): boolean {
-  if (developmentPolicyEnabled()) return isDestructiveControl(value);
+export function isSensitiveControl(value: string, strict = false): boolean {
+  if (developmentPolicyEnabled() && !strict) return isDestructiveControl(value);
   const normalized = normalizeUiText(value);
   return /(?:^|[\s/:.])(subscribe|subscribed|like|comment|delete|send|purchase|payment|login|sign in|dang ky|dang nhap|thanh toan|mua hang|xoa|don dep|don ngay|clean now|optimize now|toi uu ngay|reset|factory reset|uninstall|go cai dat|khoi phuc cai dat goc|dat lai thiet bi|erase|wipe|format|clear data|clear cache)(?:$|\s|button)/.test(normalized);
 }
@@ -30,8 +31,8 @@ export function unsafeBrowserInput(text: string): boolean {
   try { return isSensitiveControl(new URL(text.trim()).pathname); }
   catch { return true; }
 }
-export function assessPlanPolicy(plan: ActionPlan): PolicyDecision {
-  if (developmentPolicyEnabled()) {
+export function assessPlanPolicy(plan: ActionPlan, strict = false): PolicyDecision {
+  if (developmentPolicyEnabled() && !strict) {
     const destructive = plan.actions.some(action => action.type === 'CLICK' && isDestructiveControl(action.target));
     return { decision: destructive ? 'BLOCK' : 'ALLOW', risks: destructive ? ['SENSITIVE'] : ['UNKNOWN'], llmDisagreement: false,
       reasons: [destructive ? 'Destructive actions remain blocked in development mode.' : 'Development mode: sensitivity/unknown-action policy gate disabled; native grounding and verification remain required.'] };
@@ -55,7 +56,7 @@ export function assessPlanPolicy(plan: ActionPlan): PolicyDecision {
       searchInput = false;
       return risk;
     }
-    if (isSensitiveControl(action.target)) return 'SENSITIVE';
+    if (isSensitiveControl(action.target, strict)) return 'SENSITIVE';
     searchInput = /^(search_button|address_bar|search_field|search_input)$/.test(action.target) && [APP_PACKAGE_ALIASES.youtube, APP_PACKAGE_ALIASES.chrome].includes(app);
     if (searchInput || action.target === 'back_button') return 'NAVIGATION';
     if (app === APP_PACKAGE_ALIASES.settings && action.target === 'wifi_settings') return 'NAVIGATION';

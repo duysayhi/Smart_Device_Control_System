@@ -4,7 +4,8 @@ import type { Action } from '../validators/action-plan.schema';
 import { ADB_KEYBOARD, needsAdbKeyboard, resolveAppPackage, validateAndroidPlan } from './capabilities';
 import { findUiTarget, parseUiHierarchy } from './targets';
 
-export type AdbRunner = (args: string[], timeoutMs?: number) => Promise<{ stdout: string; stderr: string }>;
+export interface AdbReadOptions { maxBufferBytes?: number; signal?: AbortSignal }
+export type AdbRunner = (args: string[], timeoutMs?: number, options?: AdbReadOptions) => Promise<{ stdout: string; stderr: string }>;
 
 // adb shell joins arguments on the remote shell, so host-side execFile alone is not sufficient.
 export const quoteAndroidShell = (value: string) => `'${value.split("'").join(["'", '"', "'", '"', "'"].join(''))}'`;

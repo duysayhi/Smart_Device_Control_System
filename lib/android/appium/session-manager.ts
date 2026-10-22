@@ -107,7 +107,7 @@ export class ManagedAppiumSession {
   private ports?: PortLease;
   private opening = false;
   constructor(public readonly client: AppiumClient, public readonly serial: string, private readonly run: AdbRunner,
-    private readonly verifyServer = verifyInstalledAppiumServer, private readonly allocatePorts = allocateSessionPorts) {}
+      private readonly verifyServer = verifyInstalledAppiumServer, private readonly allocatePorts = allocateSessionPorts, private readonly expectedPhysicalId?: string, private readonly observerIdleTimeoutMs?: number) {}
   get path(): string {
     if (!this.id) throw new AndroidExecutionError('SESSION_ERROR', 'Appium session has not been created.');
     return `/session/${encodeURIComponent(this.id)}`;
@@ -118,7 +118,7 @@ export class ManagedAppiumSession {
     this.opening = true;
     try {
     checkCancellation(signal);
-    const idleTimeout = Number(process.env.ANDROID_OBSERVER_IDLE_TIMEOUT_MS ?? 1000);
+    const idleTimeout = this.observerIdleTimeoutMs ?? Number(process.env.ANDROID_OBSERVER_IDLE_TIMEOUT_MS ?? 1000);
     if (!Number.isInteger(idleTimeout) || idleTimeout < 500 || idleTimeout > 10000) throw new AndroidExecutionError('CONFIG_ERROR', 'ANDROID_OBSERVER_IDLE_TIMEOUT_MS must be an integer between 500 and 10000.');
     const chromedriver = process.env.APPIUM_CHROMEDRIVER_EXECUTABLE;
     if (chromedriver && (!isAbsolute(chromedriver) || !(await stat(chromedriver).catch(() => null))?.isFile())) {
@@ -127,6 +127,7 @@ export class ManagedAppiumSession {
     await assertDeviceConnected(this.run, this.serial);
     const physical = await readTransportIdentity(this.run, this.serial, true);
     this.physicalId = physical?.physicalId;
+    if (this.expectedPhysicalId && this.physicalId !== this.expectedPhysicalId) throw new AndroidExecutionError('DEVICE_ERROR', 'Owner-authorized physical device changed before Session creation; no Session authorized.');
     if (transportMode(this.serial) === 'Wi-Fi' && (!physical || !await wirelessIdentityAllowed(this.serial, physical.physicalId))) {
       throw new AndroidExecutionError('CONFIG_ERROR', 'Wireless physical identity is unverified; do not create a Session.');
     }

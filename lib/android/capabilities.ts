@@ -50,7 +50,7 @@ export function videoOrdinal(target: string): number | undefined {
 export function resolveAppPackage(app: string): string {
   const value = APP_PACKAGE_ALIASES[app.trim().toLowerCase()] ?? app.trim();
   if (!/^[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z0-9_]+)+$/.test(value)) {
-    throw new Error(`Unsupported app: ${app}. Use ${Object.keys(APP_PACKAGE_ALIASES).join(', ')} or a package name.`);
+    throw new Error(`LEGACY_APP_DISCOVERY_REQUIRED: Unsupported app: ${app}. Use the Goal Agent tab for installed-app discovery; Action Plan requires a supported alias or an exact installed package name.`);
   }
   return value;
 }

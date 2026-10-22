@@ -15,6 +15,11 @@ export interface UiNode {
   focusable?: boolean;
   scrollable?: boolean;
   selected?: boolean;
+  checkable?: boolean;
+  checked?: boolean;
+  password?: boolean;
+  showingHint?: boolean;
+  hint?: string;
   observedAttributes?: string[];
 }
 
@@ -50,6 +55,11 @@ export function parseUiHierarchy(xml: string): UiNode[] {
         focusable: value.focusable === undefined ? undefined : value.focusable === 'true',
         scrollable: value.scrollable === undefined ? undefined : value.scrollable === 'true',
         selected: value.selected === undefined ? undefined : value.selected === 'true',
+        checkable: value.checkable === undefined ? undefined : value.checkable === 'true',
+        checked: value.checked === undefined ? undefined : value.checked === 'true',
+        password: value.password === undefined ? undefined : value.password === 'true',
+        showingHint: value['showing-hint'] === undefined ? undefined : value['showing-hint'] === 'true',
+        hint: value['hint-text'] === undefined && value.hint === undefined ? undefined : String(value['hint-text'] ?? value.hint),
         observedAttributes: Object.keys(value).filter((key) => key !== 'node'),
       });
       }

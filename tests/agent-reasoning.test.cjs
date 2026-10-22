@@ -54,7 +54,9 @@ test('real adapter telemetry is derived from server metrics, not fabricated toke
   const client = new OllamaAgentReasoner(async () => Response.json({ message: { content: '{"type":"OBSERVE_AGAIN","reason":"Wait for evidence"}' }, load_duration: 123000000, prompt_eval_count: 80, eval_count: 12, eval_duration: 456000000 }));
   await client.generate(DecisionSchema, 'Internal', {}, budget);
   assert.equal(budget.counters.reasoning, 1);
-  assert.deepEqual({ ...budget.reasoningMeasurements[0], model: '', elapsedMs: 0, responseMs: 0 }, { model: '', elapsedMs: 0, responseMs: 0, status: 'VALID', loadMs: 123, promptTokens: 80, outputTokens: 12, evalMs: 456 });
+  const { queueWaitMs, serviceMs, deadlineRemainingMs, ...measurement } = budget.reasoningMeasurements[0];
+  assert.ok(queueWaitMs >= 0); assert.ok(serviceMs >= 0); assert.ok(deadlineRemainingMs > 0);
+  assert.deepEqual({ ...measurement, model: '', elapsedMs: 0, responseMs: 0 }, { model: '', elapsedMs: 0, responseMs: 0, status: 'VALID', loadMs: 123, promptTokens: 80, outputTokens: 12, evalMs: 456 });
 });
 test('timeout, HTTP failure and invalid JSON are distinct safe outcomes with one counted call', async () => {
   for (const [status, fetcher] of [['TIMEOUT', async () => { throw new DOMException('Timeout', 'TimeoutError'); }],

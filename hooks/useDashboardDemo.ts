@@ -18,6 +18,7 @@ export function useDashboardDemo() {
   const [commandText, setCommandText] = useState(SAMPLE_COMMANDS[0].prompt);
   const [planStatus, setPlanStatus] = useState<PlanStatus>('IDLE');
   const [currentPlan, setCurrentPlan] = useState<ActionPlan | null>(null);
+  const [planAuthorization, setPlanAuthorization] = useState<string>();
   const [analysisError, setAnalysisError] = useState<string | null>(null);
   const [executionSteps, setExecutionSteps] = useState<ExecutionStepResult[]>([]);
   const [executionStatus, setExecutionStatus] = useState<'IDLE' | 'RUNNING' | 'SUCCESS' | 'FAILED' | 'SENT'>('IDLE');
@@ -133,6 +134,7 @@ export function useDashboardDemo() {
 
     const requestId = ++analysisRequestIdRef.current;
     setPlanStatus('ANALYZING');
+    setPlanAuthorization(undefined);
     setCurrentPlan(null);
     setAnalysisError(null);
 
@@ -140,12 +142,13 @@ export function useDashboardDemo() {
       const response = await fetch('/api/commands/interpret', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ prompt: commandText }),
+        body: JSON.stringify({ prompt: commandText, ...(selectedAndroidSerial ? { deviceId: selectedAndroidSerial } : {}) }),
       });
       const payload = await response.json().catch(() => null) as {
         success?: boolean;
         error?: string;
         actionPlan?: unknown;
+        authorizationToken?: string;
       } | null;
       if (!response.ok || payload?.success !== true) {
         throw new Error(payload?.error || 'Không thể phân tích lệnh.');
@@ -155,6 +158,7 @@ export function useDashboardDemo() {
       if (!parsedPlan.success) throw new Error('Action Plan trả về từ API không hợp lệ.');
       if (requestId !== analysisRequestIdRef.current) return;
 
+      setPlanAuthorization(payload.authorizationToken);
       setCurrentPlan({
         ...parsedPlan.data,
         commandPrompt: commandText,
@@ -211,7 +215,7 @@ export function useDashboardDemo() {
     })));
 
     try {
-      const payload = { deviceId: targetDevice.serial, actionPlan: validatedPlan.data };
+      const payload = { deviceId: targetDevice.serial, actionPlan: validatedPlan.data, originalRequest: currentPlan.commandPrompt, authorizationToken: planAuthorization };
       let response = await fetch('/api/executions', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -321,7 +325,7 @@ export function useDashboardDemo() {
       if (executionAbortControllerRef.current === controller) executionAbortControllerRef.current = null;
       setIsExecuting(false);
     }
-  }, [androidDevices, currentPlan, isExecuting, refreshAndroidDevices, selectedAndroidSerial]);
+  }, [androidDevices, currentPlan, isExecuting, planAuthorization, refreshAndroidDevices, selectedAndroidSerial]);
 
   const handleStopExecution = useCallback(() => {
     executionAbortControllerRef.current?.abort();

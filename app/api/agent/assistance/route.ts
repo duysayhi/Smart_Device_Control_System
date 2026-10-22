@@ -2,7 +2,7 @@ import { z } from 'zod';
 import { submitHumanChoice, cancelAgent } from '@/lib/android/agent/human-assistance';
 import { runningWorkerTasks, workerRequest } from '@/lib/android/agent/worker-client';
 import type { DeviceTask } from '@/lib/android/agent/runtime-schema';
-import { isLocalSameOrigin } from '@/lib/android/agent/request-origin';
+import { isLocalMutation } from '@/lib/android/agent/request-origin';
 
 const Input = z.discriminatedUnion('type', [
   z.object({ type: z.literal('CONFIRM'), token: z.string().uuid(), evidenceId: z.string().uuid(), x: z.number().finite(), y: z.number().finite(), confirmed: z.literal(true) }).strict(),
@@ -10,7 +10,7 @@ const Input = z.discriminatedUnion('type', [
   z.object({ type: z.literal('STOP'), token: z.string().uuid() }).strict(),
 ]);
 export async function POST(request: Request) {
-  if (!isLocalSameOrigin(request)) return Response.json({ error: 'Origin không hợp lệ.' }, { status: 403 });
+  if (!isLocalMutation(request)) return Response.json({ error: 'Origin không hợp lệ.' }, { status: 403 });
   const parsed = Input.safeParse(await request.json().catch(() => null));
   if (!parsed.success) return Response.json({ error: 'Xác nhận không hợp lệ.' }, { status: 400 });
   const input = parsed.data;

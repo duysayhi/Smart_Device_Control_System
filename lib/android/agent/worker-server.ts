@@ -1,13 +1,15 @@
 import { createServer, type IncomingMessage } from 'node:http';
 import { mkdir, readFile, writeFile, rename, unlink, rmdir } from 'node:fs/promises';
+import { appendFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { DeviceRuntimeRegistry, type RuntimeAdapter } from './device-runtime';
 import { RuntimeCommand, EvidenceQuery, type DeviceTask } from './runtime-schema';
-import { runtimeDirectory } from './runtime-storage';
+import { runtimeDirectory, androidRuntimeDigest } from './runtime-storage';
 import { sharedReasoningScheduler } from './reasoning-scheduler';
 import type { WorkerAddress } from './runtime-storage';
 import { z } from 'zod';
+import { CatalogWarmup } from './catalog-warmup';
 
 async function jsonBody(request: IncomingMessage) {
   const chunks: Buffer[] = []; let size = 0;
@@ -31,13 +33,16 @@ export async function startWorker(options: { directory?: string; adapter?: Runti
   await writeFile(join(lock, 'pid.json'), JSON.stringify({ pid: process.pid }), { mode: 0o600 });
   const stateFile = join(root, 'tasks.json'), token = randomBytes(32).toString('hex');
   let writes = Promise.resolve(), stopping = false, saveTimer: ReturnType<typeof setTimeout> | undefined;
+  let warmup: CatalogWarmup | undefined, admitting = 0;
   const registry = new DeviceRuntimeRegistry(options.adapter, () => {
+    warmup?.schedule();
     if (saveTimer) return;
     saveTimer = setTimeout(() => {
       saveTimer = undefined; const content = JSON.stringify(registry.persisted());
       writes = writes.then(async () => { await writeFile(stateFile + '.tmp', content, { mode: 0o600 }); await rename(stateFile + '.tmp', stateFile); }).catch(() => { console.error('Runtime journal write failed.'); });
     }, 100);
   });
+  if (!options.adapter) warmup = new CatalogWarmup(() => !stopping && admitting === 0 && registry.ownerTestModes().length === 0 && !registry.list().some(t => !t.finishedAt));
   try {
     const saved = JSON.parse(await readFile(stateFile, 'utf8')) as DeviceTask[];
     if (Array.isArray(saved)) registry.restore(saved);
@@ -47,7 +52,7 @@ export async function startWorker(options: { directory?: string; adapter?: Runti
     const received = Buffer.from(request.headers.authorization ?? ''), expected = Buffer.from('Bearer ' + token);
     if (request.headers.origin || received.length !== expected.length || !timingSafeEqual(received, expected)) { response.writeHead(403).end('{}'); return; }
     try {
-      if (request.url === '/health') { response.end(JSON.stringify({ protocol: 1, pid: process.pid, queue: sharedReasoningScheduler.summary() })); return; }
+      if (request.url === '/health') { response.end(JSON.stringify({ protocol: 1, features: ['agent-v2', 'owner-test-mode', 'source-policy-v2'], pid: process.pid, queue: sharedReasoningScheduler.summary() })); return; }
       if (request.url?.startsWith('/evidence?') && request.method === 'GET') {
         const query = EvidenceQuery.parse(Object.fromEntries(new URL(request.url, 'http://127.0.0.1').searchParams));
         const task = registry.list().find(task => task.executionId === query.executionId && task.deviceId === query.deviceId);
@@ -77,16 +82,35 @@ export async function startWorker(options: { directory?: string; adapter?: Runti
       }
       if (request.url === '/tasks' && request.method === 'GET') {
         const devices = await registry.refreshConnections();
+        warmup?.connected(devices);
         const tasks = registry.list();
         for (const task of tasks) if (task.latest?.visual?.image) {
           task.latest.visual.image.dataUrl = '/api/agent/runtime?' + new URLSearchParams({ executionId: task.executionId, deviceId: task.deviceId, evidenceId: task.latest.visual.id }).toString();
         }
-        response.end(JSON.stringify({ tasks, devices, reasoning: sharedReasoningScheduler.summary() })); return;
+        response.end(JSON.stringify({ tasks, devices, reasoning: sharedReasoningScheduler.summary(), ownerTestModes: registry.ownerTestModes(), ownerPolicyAudit: registry.ownerPolicyAudit() })); return;
       }
       if (request.url !== '/tasks' || request.method !== 'POST' || stopping) { response.writeHead(404).end('{}'); return; }
       const command = RuntimeCommand.parse(await jsonBody(request));
-      const result = command.type === 'START' ? { tasks: await registry.start(command) } :
-        { accepted: command.type === 'CANCEL' ? registry.cancel(command.executionId, command.deviceId) : command.type === 'CANCEL_BATCH' ? registry.cancelBatch(command.batchId) > 0 : registry.confirm(command) };
+      if (command.type === 'SET_OWNER_TEST_MODE') {
+        const audit = (authorizationId: string, accepted: boolean) => appendFileSync(join(root, 'owner-test-policy-audit.jsonl'), JSON.stringify({ at: Date.now(), event: command.enabled ? 'ENABLED' : 'DISABLED', accepted, deviceId: command.deviceId, physicalId: command.physicalId, authorizationId, fullControl: command.fullControl === true, rollbackOnFailure: command.rollbackOnFailure === true }) + '\n', { mode: 0o600 });
+        // Commit the rare authorization change only after its audit write; never expose an unaudited enable window.
+        if (command.enabled) admitting++;
+        try {
+          if (command.enabled) await warmup?.pause();
+          const accepted = await registry.setOwnerTestMode(command, mode => audit(mode.id, true));
+          if (!command.enabled) audit(command.authorizationId!, accepted);
+          response.end(JSON.stringify({ accepted }));
+        } finally { if (command.enabled) admitting--; warmup?.schedule(); }
+        return;
+      }
+      if (command.type === 'START') {
+        admitting++;
+        try { await warmup?.pause(); response.end(JSON.stringify({ tasks: await registry.start(command) })); }
+        finally { admitting--; warmup?.schedule(); }
+        return;
+      }
+      const result =
+        { accepted: command.type === 'CANCEL' ? registry.cancel(command.executionId, command.deviceId) : command.type === 'CANCEL_BATCH' ? registry.cancelBatch(command.batchId) > 0 : command.type === 'ASSIST_V2' ? registry.confirmV2(command) : registry.confirm(command) };
       response.end(JSON.stringify(result));
     } catch (error) {
       response.writeHead(409).end(JSON.stringify({ error: error instanceof Error ? error.message.slice(0, 240) : 'Runtime command rejected.' }));
@@ -94,10 +118,12 @@ export async function startWorker(options: { directory?: string; adapter?: Runti
   });
   await new Promise<void>((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', () => resolve()); });
   const address = server.address(); if (!address || typeof address === 'string') throw new Error('No worker address.');
-  const metadata: WorkerAddress = { port: address.port, token, pid: process.pid, protocol: 1 };
+  const metadata: WorkerAddress = { port: address.port, token, pid: process.pid, protocol: 1, features: ['agent-v2', 'owner-test-mode', 'full-control-test-mode', 'source-policy-v2'],
+    runtimeSha256: androidRuntimeDigest(), observerIdleTimeoutMs: Number(process.env.AGENT_V2_OBSERVER_IDLE_TIMEOUT_MS ?? process.env.ANDROID_OBSERVER_IDLE_TIMEOUT_MS ?? 1000) };
   await writeFile(join(root, 'address.json'), JSON.stringify(metadata), { mode: 0o600 });
   const shutdown = async () => {
     if (stopping) return; stopping = true;
+    await warmup?.close();
     await registry.shutdown();
     if (saveTimer) { clearTimeout(saveTimer); saveTimer = undefined; }
     await writes; await writeFile(stateFile, JSON.stringify(registry.persisted()), { mode: 0o600 });

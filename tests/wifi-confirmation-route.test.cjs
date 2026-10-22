@@ -4,7 +4,7 @@ require.extensions['.ts'] = (m, f) => m._compile(ts.transpileModule(fs.readFileS
 let sessions = 0, actions = 0, closed = 0;
 const load = Module._load;
 Module._load = function (name, parent, main) {
-  if (name === '@/lib/android/adb') return { isValidAndroidSerial: () => true, listAndroidDevices: async () => ['A', 'B'].map(serial => ({ serial, connectionType: 'USB', status: 'device' })), runAdb: async () => assert.fail('Unexpected real ADB') };
+  if (name === '@/lib/android/adb') return { isValidAndroidSerial: () => true, listAndroidDevices: async () => ['A', 'B'].map(serial => ({ serial, physicalId: 'physical-' + serial, identityVerified: true, connectionType: 'USB', status: 'device' })), runAdb: async () => assert.fail('Unexpected real ADB') };
   if (name === '@/lib/android/condition-executor') return {
     assertNonSensitivePlan: plan => require('../lib/android/security-policy.ts').assertPlanPolicy(plan),
     createExecutionContext: async (_serial, _actions, _run, _signal, accounting) => {
@@ -24,11 +24,19 @@ Module._load = function (name, parent, main) {
 };
 const { POST } = require('../app/api/executions/route.ts');
 const { planWifiOff, planWifiOn, planWifiConnection } = require('../lib/android/wifi-plan.ts');
+const { issuePlanAuthorization } = require('../lib/android/action-plan-authorization.ts');
 const plan = planWifiOff('tắt wifi');
-const request = (payload, origin = 'http://127.0.0.1:3000') => new Request('http://localhost:3000/api/executions', {
+const request = (payload, origin = 'http://127.0.0.1:3000') => {
+  const actionPlan = payload.actionPlan ?? plan, deviceId = payload.deviceId ?? 'A', source = actionPlan.intent;
+  // Stronger transport fixture: model production-issued source/plan/physical-device authority.
+  // Invalid plans still test the route policy rather than receiving a forged grant.
+  let authorizationToken;
+  try { authorizationToken = issuePlanAuthorization(deviceId, 'physical-' + deviceId, source, actionPlan); } catch { authorizationToken = require('node:crypto').randomUUID(); }
+  return new Request('http://localhost:3000/api/executions', {
   method: 'POST', headers: { Host: '127.0.0.1:3000', ...(origin ? { Origin: origin } : {}), 'Content-Type': 'application/json' },
-  body: JSON.stringify({ deviceId: 'A', actionPlan: plan, ...payload }),
+  body: JSON.stringify({ deviceId, actionPlan, originalRequest: source, authorizationToken, ...payload }),
 });
+};
 
 test('enable confirmation is explicit, bound to ON and cannot authorize OFF', async () => {
   const old = process.env.ANDROID_EXECUTOR_BACKEND; process.env.ANDROID_EXECUTOR_BACKEND = 'appium';

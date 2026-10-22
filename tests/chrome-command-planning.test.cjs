@@ -20,7 +20,7 @@ Module._load = function (name, parent, main) {
   return load.call(this, name.startsWith('@/') ? path.resolve(__dirname, '..', name.slice(2)) : name, parent, main);
 };
 const { POST } = require('../app/api/commands/interpret/route.ts');
-const request = prompt => new Request('http://localhost/api/commands/interpret', { method: 'POST', body: JSON.stringify({ prompt }) });
+const request = prompt => new Request('http://localhost/api/commands/interpret', { method: 'POST', headers: { Origin: 'http://localhost', 'Content-Type': 'application/json' }, body: JSON.stringify({ prompt }) });
 
 test('Chrome search prepares the address bar before typing and never waits for video_list', () => {
   for (const prompt of ['Mở chrome và tìm công thức nấu bún bò huế ngon', 'Mở Chrome, tìm Công thức nấu ăn', 'Mở Chrome tìm recipe']) {

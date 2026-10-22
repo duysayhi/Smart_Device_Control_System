@@ -9,3 +9,8 @@ export function isLocalSameOrigin(request: Request): boolean {
     return !origin || new URL(origin).origin === expected.origin;
   } catch { return false; }
 }
+export function isLocalMutation(request: Request): boolean {
+  return Boolean(request.headers.get('origin')) && isLocalSameOrigin(request) &&
+    request.headers.get('content-type')?.split(';')[0].trim().toLowerCase() === 'application/json' &&
+    request.headers.get('sec-fetch-site') !== 'cross-site';
+}

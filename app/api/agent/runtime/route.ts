@@ -1,6 +1,6 @@
 import { RuntimeCommand, EvidenceQuery } from '@/lib/android/agent/runtime-schema';
 import { workerRequest } from '@/lib/android/agent/worker-client';
-import { isLocalSameOrigin } from '@/lib/android/agent/request-origin';
+import { isLocalSameOrigin, isLocalMutation } from '@/lib/android/agent/request-origin';
 export async function GET(request: Request) {
   if (!isLocalSameOrigin(request)) return Response.json({ error: 'Origin không hợp lệ.' }, { status: 403 });
   const query = new URL(request.url).searchParams;
@@ -16,7 +16,7 @@ export async function GET(request: Request) {
   catch { return Response.json({ error: 'Runtime worker không sẵn sàng.' }, { status: 503 }); }
 }
 export async function POST(request: Request) {
-  if (!isLocalSameOrigin(request)) return Response.json({ error: 'Origin không hợp lệ.' }, { status: 403 });
+  if (!isLocalMutation(request)) return Response.json({ error: 'Origin không hợp lệ.' }, { status: 403 });
   const command = RuntimeCommand.safeParse(await request.json().catch(() => null));
   if (!command.success) return Response.json({ error: 'Lệnh runtime không hợp lệ.' }, { status: 400 });
   try { const response = await workerRequest('POST', command.data); return Response.json(await response.json(), { status: response.status }); }

@@ -7,6 +7,45 @@ interface Connection {
   serial: string; ip: string; port: number; physicalId?: string; model?: string;
   state: string; lastConnectedAt?: number; error?: string; currentSessionId?: string; currentExecutionId?: string;
 }
+export function ConnectionHistory({ connections, pending, onCommand }: {
+  connections: Connection[]; pending: boolean;
+  onCommand: (command: { type: 'RECONNECT' | 'DISCONNECT'; serial: string }) => void;
+}) {
+  const recent = connections.map((connection, index) => ({ connection, index }))
+    .sort((a, b) => (b.connection.lastConnectedAt ?? 0) - (a.connection.lastConnectedAt ?? 0) || b.index - a.index);
+  if (!recent.length) return null;
+  return <section aria-label="Lịch sử kết nối" className="min-w-0 border-t border-slate-200 pt-3">
+    <div className="mb-2 flex items-center justify-between gap-2 text-xs">
+      <h3 className="font-semibold">Lịch sử kết nối</h3>
+      <span className="text-slate-500">{recent.length} kết nối</span>
+    </div>
+    <div role="region" aria-label="Danh sách lịch sử kết nối" tabIndex={0}
+      className="h-80 overflow-y-auto overscroll-contain rounded border border-slate-200 [scrollbar-gutter:stable] focus-visible:outline-2 focus-visible:outline-indigo-500">
+      <ul className="divide-y divide-slate-200">
+        {recent.map(({ connection }) => <li key={connection.serial} className="grid h-20 grid-cols-[minmax(0,1fr)_auto] items-center gap-2 px-3 text-xs">
+          <div className="min-w-0 space-y-1">
+            <div className="flex min-w-0 items-center gap-2">
+              <strong className="truncate" title={connection.model || connection.serial}>{connection.model || connection.serial}</strong>
+              <span className="shrink-0 text-[10px] text-slate-500">{connection.state}</span>
+            </div>
+            <div className="truncate text-slate-500" title={connection.serial}>
+              {connection.ip}:{connection.port}{connection.lastConnectedAt ? ` · ${new Date(connection.lastConnectedAt).toLocaleTimeString()}` : ''}
+            </div>
+            {connection.error && <p role="alert" className="truncate text-red-600" title={connection.error}>{connection.error}</p>}
+          </div>
+          <div className="flex shrink-0 gap-1">
+            <button type="button" title="Kết nối lại cùng endpoint, không resume execution" aria-label={`Kết nối lại ${connection.serial}`}
+              className="inline-flex h-9 w-9 items-center justify-center rounded border border-slate-200 bg-white text-slate-700 disabled:opacity-40"
+              disabled={pending} onClick={() => onCommand({ type: 'RECONNECT', serial: connection.serial })}><RefreshCw size={14} /></button>
+            <button type="button" title="Ngắt kết nối ADB Wi-Fi" aria-label={`Ngắt ${connection.serial}`}
+              className="inline-flex h-9 w-9 items-center justify-center rounded border border-slate-200 bg-white text-slate-700 disabled:opacity-40"
+              disabled={pending || connection.state === 'BUSY'} onClick={() => onCommand({ type: 'DISCONNECT', serial: connection.serial })}><Unplug size={14} /></button>
+          </div>
+        </li>)}
+      </ul>
+    </div>
+  </section>;
+}
 export function ConnectionManager({ devices, selectedSerial, onSelect, onRefresh }: {
   devices: AndroidAdbDevice[]; selectedSerial: string; onSelect: (serial: string) => void; onRefresh: () => Promise<void>;
 }) {
@@ -93,16 +132,7 @@ export function ConnectionManager({ devices, selectedSerial, onSelect, onRefresh
         <label className="flex w-32 flex-col gap-1 text-xs">TCP/IP port<input type="number" min="1024" max="65535" required value={tcpPort} onChange={e => setTcpPort(e.target.value)} className={inputClass} /></label>
         <button disabled={pending} className={buttonClass}><Wifi size={14} />Chuyển sang Wi-Fi</button>
       </form>
-      {connections.map(connection => <div key={connection.serial} className="flex min-w-0 flex-wrap items-center justify-between gap-2 border-t border-slate-200 py-2 text-xs">
-        <div className="min-w-0"><strong className="break-all">{connection.model || connection.serial}</strong><span className="ml-2">{connection.state}</span>
-          <div className="break-all text-slate-500">{connection.ip}:{connection.port}{connection.lastConnectedAt ? ` · ${new Date(connection.lastConnectedAt).toLocaleTimeString()}` : ''}</div>
-          {connection.error && <div role="alert" className="break-words text-red-600">{connection.error}</div>}
-        </div>
-        <div className="flex gap-1">
-          <button title="Kết nối lại cùng endpoint, không resume execution" aria-label={`Kết nối lại ${connection.serial}`} className={buttonClass} disabled={pending} onClick={() => void command({ type: 'RECONNECT', serial: connection.serial })}><RefreshCw size={14} /></button>
-          <button title="Ngắt kết nối ADB Wi-Fi" aria-label={`Ngắt ${connection.serial}`} className={buttonClass} disabled={pending || connection.state === 'BUSY'} onClick={() => void command({ type: 'DISCONNECT', serial: connection.serial })}><Unplug size={14} /></button>
-        </div>
-      </div>)}
+      <ConnectionHistory connections={connections} pending={pending} onCommand={body => void command(body)} />
     </div>}
     {pending && <p role="status" className="mt-2 text-xs text-indigo-700">Đang xử lý kết nối…</p>}
     {message && <p role="status" className="mt-2 break-words text-xs text-emerald-700">{message}</p>}

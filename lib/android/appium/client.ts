@@ -2,10 +2,11 @@ import { AndroidExecutionError, checkCancellation } from '../errors';
 
 export interface AppiumElement { 'element-6066-11e4-a52e-4f735466cecf': string }
 export interface AppiumSelector { using: 'id' | 'accessibility id' | 'xpath' | 'css selector'; value: string }
+export interface AppiumRpcMeasurement { kind: 'SOURCE' | 'ELEMENT' | 'SESSION' | 'CAPABILITIES' | 'SETTINGS' | 'SCREENSHOT' | 'OTHER'; elapsedMs: number; outcome: 'OK' | 'ERROR' }
 
 export class AppiumClient {
   private readonly url: string;
-  constructor(url = process.env.APPIUM_URL ?? 'http://127.0.0.1:4723', private readonly fetcher: typeof fetch = fetch) {
+  constructor(url = process.env.APPIUM_URL ?? 'http://127.0.0.1:4723', private readonly fetcher: typeof fetch = fetch, private readonly report?: (value: AppiumRpcMeasurement) => void) {
     const parsed = new URL(url);
     if (!['http:', 'https:'].includes(parsed.protocol) || parsed.username || parsed.password) {
       throw new AndroidExecutionError('CONFIG_ERROR', 'APPIUM_URL must be an HTTP(S) URL without credentials.');
@@ -15,6 +16,7 @@ export class AppiumClient {
 
   async request<T>(method: string, path: string, body?: unknown, timeoutMs = 15000, signal?: AbortSignal): Promise<T> {
     checkCancellation(signal);
+    const started = performance.now(); let outcome: AppiumRpcMeasurement['outcome'] = 'ERROR';
     try {
       const response = await this.fetcher(this.url + path, {
         method, headers: { 'Content-Type': 'application/json' },
@@ -36,7 +38,7 @@ export class AppiumClient {
         else if (/no such context|context.*not found/i.test(message)) error.backendReason = 'CONTEXT_UNAVAILABLE';
         throw error;
       }
-      return payload.value;
+      outcome = 'OK'; return payload.value;
     } catch (error) {
       checkCancellation(signal);
       if (error instanceof AndroidExecutionError) throw error;
@@ -47,6 +49,9 @@ export class AppiumClient {
       const networkCode = (error as { cause?: { code?: string } })?.cause?.code;
       if (networkCode === 'ECONNREFUSED' || networkCode === 'ENOTFOUND') failure.requestOutcomeKnown = true;
       throw failure;
+    } finally {
+      try { this.report?.({ kind: path.endsWith('/source') ? 'SOURCE' : /\/elements?(?:\/|$)/.test(path) ? 'ELEMENT' : path === '/session' ? 'SESSION' : path.endsWith('/capabilities') ? 'CAPABILITIES' : path.endsWith('/settings') ? 'SETTINGS' : path.endsWith('/screenshot') ? 'SCREENSHOT' : 'OTHER', elapsedMs: performance.now() - started, outcome }); }
+      catch { /* Diagnostics must not change command/ownership results. */ }
     }
   }
 }

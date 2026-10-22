@@ -7,16 +7,22 @@ import { ExecutionStepResult, ExecutionStreamEvent } from '@/types/execution';
 import { assessPlanPolicy } from '@/lib/android/security-policy';
 import { isWifiOffPlan, isWifiOnPlan, wifiNetworkForPlan } from '@/lib/android/wifi-plan';
 import { issueWifiConfirmation, consumeWifiConfirmation } from '@/lib/android/wifi-confirmation';
-import { isLocalSameOrigin } from '@/lib/android/agent/request-origin';
+import { isLocalMutation } from '@/lib/android/agent/request-origin';
+import { assertSafePlan, forbiddenSource } from '@/lib/android/safety-envelope';
+import { consumePlanAuthorization, assertLegacyExecutionPolicy } from '@/lib/android/action-plan-authorization';
 import { developmentPolicyEnabled } from '@/lib/android/policy-mode';
+import { requestRequiresPlayback } from '@/lib/android/agent/outcome-spec';
 
 const ExecutionRequestSchema = z.object({
   deviceId: z.string().min(1).max(128),
   actionPlan: ActionPlanSchema,
+  originalRequest: z.string().trim().min(1).max(2000),
+  authorizationToken: z.string().uuid(),
   confirmationToken: z.string().uuid().optional(),
-});
+}).strict();
 
 export async function POST(request: Request) {
+  if (!isLocalMutation(request)) return Response.json({ success: false, error: 'Same-origin JSON request required.' }, { status: 403 });
   const body = await request.json().catch(() => null);
   const parsed = ExecutionRequestSchema.safeParse(body);
 
@@ -27,6 +33,8 @@ export async function POST(request: Request) {
     );
   }
 
+  try { assertSafePlan(parsed.data.originalRequest, parsed.data.actionPlan); }
+  catch (error) { return Response.json({ success: false, error: error instanceof Error ? error.message : 'Blocked request.' }, { status: forbiddenSource(parsed.data.originalRequest) ? 403 : 422 }); }
   let devices;
   try {
     devices = await listAndroidDevices();
@@ -44,7 +52,7 @@ export async function POST(request: Request) {
       { status: 404 }
     );
   }
-  if (targetDevice.connectionType === 'Wi-Fi' && !targetDevice.identityVerified) {
+  if (!targetDevice.identityVerified || !targetDevice.physicalId) {
     return Response.json(
       { success: false, error: 'Wireless device identity is unverified. Reconnect and verify physical identity first.' },
       { status: 400 }
@@ -58,13 +66,12 @@ export async function POST(request: Request) {
   }
 
   const { deviceId, actionPlan } = parsed.data;
-  const policy = assessPlanPolicy(actionPlan);
+  const policy = assessPlanPolicy(actionPlan, true);
   const wifiOff = isWifiOffPlan(actionPlan);
   const wifiOn = isWifiOnPlan(actionPlan);
   const wifiNetwork = wifiNetworkForPlan(actionPlan);
   const wifiChange = wifiOff || wifiOn || wifiNetwork !== undefined;
   if (wifiChange) {
-    if (!request.headers.get('origin') || !isLocalSameOrigin(request)) return Response.json({ success: false, error: 'Same-origin confirmation required.' }, { status: 403 });
     if ((process.env.ANDROID_EXECUTOR_BACKEND ?? 'appium') !== 'appium') return Response.json({ success: false, error: 'Wi-Fi control requires Appium.' }, { status: 422 });
     if (!developmentPolicyEnabled() && !parsed.data.confirmationToken) return Response.json({ success: false, confirmationRequired: true,
       wifiEnabled: wifiOn, wifiNetwork, confirmationToken: issueWifiConfirmation(deviceId, actionPlan),
@@ -76,9 +83,12 @@ export async function POST(request: Request) {
   const signal = AbortSignal.any([request.signal, cancellation.signal, AbortSignal.timeout(300000)]);
   let execution: Awaited<ReturnType<typeof createExecutionContext>>;
   try {
-    if (developmentPolicyEnabled() || !wifiChange) assertNonSensitivePlan(actionPlan);
+    consumePlanAuthorization(parsed.data.authorizationToken, deviceId, targetDevice.physicalId, parsed.data.originalRequest, actionPlan);
+    if (!wifiChange) { assertLegacyExecutionPolicy(actionPlan); assertNonSensitivePlan(actionPlan); }
     execution = await createExecutionContext(deviceId, actionPlan.actions, runAdb, signal,
-      wifiNetwork !== undefined ? { wifiNetworkConfirmed: wifiNetwork } : wifiOff ? { wifiOffConfirmed: true } : wifiOn ? { wifiOnConfirmed: true } : undefined);
+      { ...(wifiNetwork !== undefined ? { wifiNetworkConfirmed: wifiNetwork } : wifiOff ? { wifiOffConfirmed: true } : wifiOn ? { wifiOnConfirmed: true } : {}),
+        expectedPhysicalId: targetDevice.physicalId,
+        requirePlayback: Boolean(parsed.data.originalRequest && requestRequiresPlayback(parsed.data.originalRequest, actionPlan.actions.flatMap(action => action.type === 'INPUT_TEXT' ? [action.text] : []))) });
   } catch (error) {
     const failure = asAndroidError(error);
     return Response.json({ success: false, error: failure.message, errorCode: failure.code, policy }, { status: failure.code === 'SESSION_ERROR' ? 409 : 422 });

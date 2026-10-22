@@ -221,6 +221,7 @@ function humanAdapter() {
     const after = snapshot(goal.packageName); after.screen = 'VIDEO_PLAYER';
     after.deviceSerial = serial;
     after.nodes = [{ ...before.nodes[0], resourceId: goal.packageName + ':id/video_title', text: 'Simulated podcast' }];
+    after.playback = { source: 'ADB_MEDIA_SESSION', packageName: goal.packageName, title: 'Simulated podcast', positionMs: 2000, previousPositionMs: 1000 };
     return { backend: 'appium', observe: async () => ({ ...before, timestamp: Date.now(), snapshotId: randomUUID() }), discoveryMemory() {}, verificationSnapshot: () => ({ ...after, timestamp: Date.now() }),
       async execute() { const error = new AndroidExecutionError('AMBIGUOUS', 'Activation requires a human point'); error.visual = visual; throw error; },
       async confirmVisualTap(choice) { assert.equal(choice.evidenceId, visual.id); state.taps++; return { verification: 'VERIFIED', selection: { itemType: 'video', ordinal: 2, title: 'Simulated podcast', identity: serial } }; },

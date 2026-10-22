@@ -62,10 +62,13 @@ export const DecisionSchema = z.discriminatedUnion('type', [
 export type AgentDecision = z.infer<typeof DecisionSchema>;
 export type AgentStatus = 'PLANNING' | 'OBSERVING' | 'DECIDING' | 'EXECUTING' | 'EXPLORING' | 'VERIFYING' | 'NEED_HUMAN_ASSISTANCE' | 'COMPLETED' | 'BLOCKED' | 'FAILED' | 'CANCELLED';
 export interface AgentProgress {
+  v2?: import('./goal-graph').V2Progress;
   type: 'progress' | 'complete'; status: AgentStatus; goalId?: string; description?: string;
   subgoal?: string; subgoalId?: string; verifiedSubgoals?: number; totalSubgoals?: number; action?: z.infer<typeof ActionSchema>; reason: string;
   screen?: string; foregroundPackage?: string; counters?: Record<string, number>; timings?: Record<string, number>;
+  profiling?: { rpcCount: number; rpcMs: number; sourceRpcMs: number; elementRpcMs: number; parseCount: number; parseMs: number; groundingMs: number; adbCount: number; adbMs: number };
   reasoningMeasurements?: import('./budget').ReasoningMeasurement[];
+  measurements?: import('./budget').AgentBudget['measurements'];
   snapshotSources?: Record<string, number>;
   webVerification?: import('./budget').AgentBudget['webVerification'];
   assistance?: { category: 'INTERACTION_POSITION' | 'SENSITIVE_ACTION' | 'UNKNOWN_UI'; resumable: boolean; sessionRetained: boolean; expiresAt: number; evidenceId?: string; token?: string };

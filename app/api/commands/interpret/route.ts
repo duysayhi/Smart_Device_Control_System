@@ -2,6 +2,10 @@ import { z } from "zod";
 import { queuedOllamaFetch } from '@/lib/android/agent/worker-client';
 import { androidCapabilityPrompt, validateAndroidPlan, planChromeCommand } from '@/lib/android/capabilities';
 import { planWifiOff, planWifiOn, planWifiNavigation, planWifiConnection } from '@/lib/android/wifi-plan';
+import { isLocalMutation } from '@/lib/android/agent/request-origin';
+import { assertSafeSource } from '@/lib/android/safety-envelope';
+import { issuePlanAuthorization } from '@/lib/android/action-plan-authorization';
+import { listAndroidDevices } from '@/lib/android/adb';
 import {
   ActionPlanBaseSchema,
   ActionPlanSchema,
@@ -10,7 +14,8 @@ import {
 
 const RequestSchema = z.object({
   prompt: z.string().trim().min(1).max(2000),
-});
+  deviceId: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/).optional(),
+}).strict();
 
 const OllamaResponseSchema = z.object({
   message: z.object({
@@ -19,6 +24,7 @@ const OllamaResponseSchema = z.object({
 });
 
 export async function POST(request: Request) {
+  if (!isLocalMutation(request)) return Response.json({ success: false, error: 'Same-origin JSON request required.' }, { status: 403 });
   // 1. Nhận và kiểm tra câu lệnh
   const body = await request.json().catch(() => null);
 
@@ -32,6 +38,11 @@ export async function POST(request: Request) {
   }
 
   try {
+    assertSafeSource(input.data.prompt);
+    const identity = input.data.deviceId ? (await listAndroidDevices()).find(d => d.serial === input.data.deviceId && d.status === 'device' && d.identityVerified && d.physicalId) : undefined;
+    if (input.data.deviceId && !identity?.physicalId) return Response.json({ success: false, error: 'Selected device identity is unavailable; no execution authorization issued.' }, { status: 409 });
+    const respondPlan = (actionPlan: z.infer<typeof ActionPlanSchema>) => Response.json({ success: true, actionPlan,
+      ...(identity?.physicalId ? { authorizationToken: issuePlanAuthorization(identity.serial, identity.physicalId, input.data.prompt, actionPlan) } : {}) });
     const backend = process.env.ANDROID_EXECUTOR_BACKEND ?? 'appium';
     if (backend !== 'adb' && backend !== 'appium') {
       return Response.json({ success: false, error: 'ANDROID_EXECUTOR_BACKEND must be appium or adb.' }, { status: 500 });
@@ -40,14 +51,14 @@ export async function POST(request: Request) {
     const wifiPlan = planWifiOff(input.data.prompt) ?? planWifiOn(input.data.prompt) ?? planWifiNavigation(input.data.prompt) ?? planWifiConnection(input.data.prompt);
     if (wifiPlan) {
       if (!dynamicUi) return Response.json({ success: false, error: 'Wi-Fi control requires Appium.' }, { status: 422 });
-      return Response.json({ success: true, actionPlan: wifiPlan });
+      return respondPlan(wifiPlan);
     }
     try {
       const chromePlan = planChromeCommand(input.data.prompt);
       if (chromePlan) {
         if (!dynamicUi) return Response.json({ success: false, error: 'Chrome search/result navigation requires Appium.' }, { status: 422 });
         validateAndroidPlan(chromePlan.actions, true);
-        return Response.json({ success: true, actionPlan: chromePlan });
+        return respondPlan(chromePlan);
       }
     } catch (error) {
       return Response.json({ success: false, error: error instanceof Error ? error.message : 'Invalid browser request.' }, { status: 422 });
@@ -62,7 +73,7 @@ export async function POST(request: Request) {
         headers: {
           "Content-Type": "application/json",
         },
-        signal: AbortSignal.timeout(timeoutMs),
+        signal: AbortSignal.any([request.signal, AbortSignal.timeout(timeoutMs)]),
         body: JSON.stringify({
           model: process.env.OLLAMA_MODEL ?? "phone-commander",
           stream: false,
@@ -229,10 +240,7 @@ Danh mục executor ở trên có ưu tiên cao nhất nếu các quy tắc trư
     }
 
     // 6. Trả về frontend
-    return Response.json({
-      success: true,
-      actionPlan: result.data,
-    });
+    return respondPlan(result.data);
   } catch (error) {
     const isTimeout =
       error instanceof Error &&

@@ -1,10 +1,25 @@
 import type { Action, ActionPlan } from '../validators/action-plan.schema';
 import { AppiumClient } from './appium/client';
+import type { AppiumRpcMeasurement } from './appium/client';
 import { ManagedAppiumSession, acquireDeviceLock, assertDeviceConnected } from './appium/session-manager';
 import { createAndroidExecutor, quoteAndroidShell, type AdbRunner } from './executor';
 import { resolveAppPackage } from './capabilities';
 import { StateObserver, observationEvidence, type Observation, type ObservationEvidence, type ObserverProgress } from './state-observer';
 import { AndroidExecutionError, checkCancellation } from './errors';
+import { executeGroundedInteraction } from './grounded-interactions';
+import { executeIntentCapability, settleIntentMutations } from './agent/intent-executor';
+import { executeTemporal, temporalInventory } from './agent/temporal-executor';
+import { readTemporalUiInventory } from './agent/temporal-ui-inventory';
+import { corroborateTemporalUi, isTemporalUiProof, type TemporalUiProof } from './agent/temporal-ui';
+import type { TemporalRequest } from './agent/temporal-contract';
+import type { TemporalInventory } from './agent/temporal-evidence';
+import type { TemporalEffectGrant } from './agent/effect-grants';
+import type { IntentApproval } from './agent/intent-capabilities';
+import type { IntentBinding } from './agent/intent-schema';
+import type { OwnerTestExecution } from './agent/owner-test-policy';
+import type { EffectGrant } from './agent/effect-grants';
+import { openMediaView } from './media-view';
+import type { MediaViewGrant } from './agent/artifact-store';
 import { uiFingerprint, verifyClickTransition, verifyBrowserSearch, verifyDiscoveredSelection } from './action-verifier';
 import { UIExplorer } from './exploration/ui-explorer';
 import { ScrollController } from './exploration/scroll-controller';
@@ -17,7 +32,10 @@ import { createMediaPlaybackVerifier } from './media-playback-verifier';
 import { disableWifi, setWifiEnabled, openWifiSettings } from './wifi-control';
 import { connectWifiNetwork } from './wifi-network';
 import { wifiNetworkTarget } from './wifi-plan';
-import { developmentPolicyEnabled } from './policy-mode';
+import { assertSafeAction, forbiddenDispatchControl } from './safety-envelope';
+import { isVerifiedApplication, discoverApplication, type DiscoveredApplication } from './agent/application-discovery';
+import { consumeCameraFallback, armCameraKey, type CameraFallbackPermit } from './agent/camera-fallback';
+import { MediaStoreReader } from './agent/media-evidence';
 
 export interface ActionOutcome {
   selection?: import('./exploration/types').DiscoveredSelection;
@@ -30,13 +48,17 @@ export interface ActionOutcome {
   interaction?: { method: string; resourceId: string; className: string; bounds: number[]; evidence: string[] };
 }
 export interface ExecutionAccounting {
+  observerIdleTimeoutMs?: number;
+  expectedPhysicalId?: string;
+  requirePlayback?: boolean;
   executionId?: string;
   wifiOffConfirmed?: boolean;
   wifiOnConfirmed?: boolean;
   wifiNetworkConfirmed?: string;
-  beforeSnapshot?: (source?: string) => void; beforeScroll?: () => void;
+  beforeSnapshot?: (source?: string) => void; beforeScroll?: () => void; beforeNavigation?: () => void;
   onWebVerification?: (value: { phase: string; urlMatches?: boolean; titleMatches?: boolean; ready?: boolean; pageError?: boolean; changed?: boolean }) => void;
   onObservation?: (ms: number) => void; onVerification?: (ms: number) => void;
+  onRpc?: (value: AppiumRpcMeasurement) => void; onParse?: (ms: number) => void;
   onVerifiedSnapshot?: (snapshot: Observation) => void;
   beforeKey?: (action: Extract<Action, { type: 'PRESS_KEY' }>, snapshot: Observation) => void;
   verifyNavigation?: (before: Observation, after: Observation) => boolean;
@@ -58,6 +80,7 @@ export class ConditionExecutor {
   private readonly scrollController: ScrollController;
   private readonly visual: VisualGroundingEngine;
   private playbackCheck?: (snapshot: Observation, signal?: AbortSignal) => Promise<boolean>;
+  async viewMediaV2(grant: MediaViewGrant, signal?: AbortSignal) { return openMediaView(this.session, this.observer, this.run, grant, signal); }
   constructor(private readonly session: ManagedAppiumSession, private readonly run: AdbRunner, private readonly accounting?: ExecutionAccounting) {
     this.observer = new StateObserver(session, run, accounting);
     this.visual = new VisualGroundingEngine(session, this.observer);
@@ -83,7 +106,7 @@ export class ConditionExecutor {
       }
       const mediaVerify = createMediaPlaybackVerifier(this.run, this.session.serial);
       const after = await this.observer.waitUntil(async (s, remaining) =>
-        verifyDiscoveredSelection(result.selection, result.before, s) || await mediaVerify(result.selection, result.before, s, remaining, signal) ? s : false,
+        (!(this.accounting?.requirePlayback && result.selection.itemType === 'video') && verifyDiscoveredSelection(result.selection, result.before, s)) || await mediaVerify(result.selection, result.before, s, remaining, signal) ? s : false,
         'human-confirmed selected destination', 30000, signal);
       this.accounting?.onVerifiedSnapshot?.(after);
       if (after.playback) this.playbackCheck = (s, cancel) => mediaVerify(result.selection, result.before, s, 3000, cancel);
@@ -95,7 +118,49 @@ export class ConditionExecutor {
     });
   }
   async execute(action: Action, signal?: AbortSignal, onProgress?: (value: ObserverProgress) => void): Promise<ActionOutcome> {
+    assertSafeAction(action);
     return withSessionContextLock(this.session, () => this.executeWithinContextLock(action, signal, onProgress));
+  }
+  async interactV2(grant: EffectGrant, signal?: AbortSignal): Promise<Observation> {
+    return executeGroundedInteraction(this.session, this.observer, grant, signal);
+  }
+  async launchDiscoveredV2(app: DiscoveredApplication, signal?: AbortSignal): Promise<void> {
+    if (!isVerifiedApplication(app) || app.serial !== this.session.serial || app.launchIntent !== 'android.media.action.STILL_IMAGE_CAMERA') throw Error('HARD_DENY: unissued camera intent resolution.');
+    await withSessionContextLock(this.session, async () => {
+      checkCancellation(signal); await this.session.ensureActive(signal);
+      await this.run(['-s', app.serial, 'shell', 'am', 'start', '-W', '-a', app.launchIntent!, '-n', app.component], 15000);
+      await this.observer.waitUntil(s => s.foregroundPackage === app.packageName ? s : false, 'resolved still-image camera foreground', 15000, signal);
+    });
+  }
+  async captureKeyV2(grant: EffectGrant, permit: CameraFallbackPermit, signal?: AbortSignal): Promise<Observation> {
+    const before = consumeCameraFallback(permit, grant);
+    const app = await discoverApplication(this.session.serial, 'camera', this.run, signal);
+    if (app.launchIntent !== 'android.media.action.STILL_IMAGE_CAMERA' || app.packageName !== grant.packageName) throw Error('HARD_DENY: fallback is restricted to the resolved default camera.');
+    const after = await new MediaStoreReader(this.session.serial, this.run).readCapture(before.physicalId, signal);
+    if (!before.summary || !after.summary || before.summary.count !== after.summary.count || before.summary.maxId !== after.summary.maxId ||
+      after.rows.some(r => !before.rows.some(old => old.uri === r.uri))) throw Error('CAPTURE_FALLBACK_BLOCKED: media changed or complete pre-state unavailable.');
+    armCameraKey(grant);
+    return executeGroundedInteraction(this.session, this.observer, grant, signal);
+  }
+  async intentV2(approval: IntentApproval, binding: IntentBinding, span: { start: number; end: number }, executionId: string, packageName: string, signal?: AbortSignal, owner?: OwnerTestExecution) {
+    return executeIntentCapability(this.session, this.observer, this.run, approval, binding, span, executionId, packageName, signal, owner);
+  }
+  async temporalInventoryV2(packageName: string, request: TemporalRequest, signal?: AbortSignal) {
+    return temporalInventory(this.session, this.run, packageName, request, signal);
+  }
+  async temporalUiInventoryV2(packageName: string, request: TemporalRequest, signal?: AbortSignal) {
+    return readTemporalUiInventory(this.session, this.observer, this.run, packageName, request, signal, this.accounting);
+  }
+  async temporalCorroborateV2(proof: TemporalUiProof, signal?: AbortSignal) {
+    return withSessionContextLock(this.session, async () => {
+      await this.session.ensureActive(signal);
+      if (!isTemporalUiProof(proof) || proof.deviceId !== this.session.serial || proof.sessionId !== this.session.sessionId || Date.now() - proof.observedAt > 5000) throw Error('STALE_OR_FOREIGN_TEMPORAL_PROOF');
+      const result = await this.run(['-s', this.session.serial, 'shell', 'dumpsys', 'alarm'], 5000);
+      return corroborateTemporalUi(proof, result.stdout);
+    });
+  }
+  async temporalV2(grant: TemporalEffectGrant, before: TemporalInventory, signal?: AbortSignal) {
+    return executeTemporal(this.session, this.observer, this.run, grant, before, signal);
   }
   private async executeWithinContextLock(action: Action, signal?: AbortSignal, onProgress?: (value: ObserverProgress) => void): Promise<ActionOutcome> {
     assertActionNotSensitive(action);
@@ -183,13 +248,13 @@ export class ConditionExecutor {
       case 'CLICK': {
         if (action.target.startsWith('wifi_connect:')) {
           const ssid = wifiNetworkTarget(action.target);
-          if (ssid === undefined || (!developmentPolicyEnabled() && this.accounting?.wifiNetworkConfirmed !== ssid)) throw new AndroidExecutionError('CONFIG_ERROR', 'Wi-Fi connection requires confirmation for this exact SSID and device.');
+          if (ssid === undefined || this.accounting?.wifiNetworkConfirmed !== ssid) throw new AndroidExecutionError('CONFIG_ERROR', 'Wi-Fi connection requires confirmation for this exact SSID and device.');
           snapshot = await connectWifiNetwork(this.session, this.observer, this.explorer, this.run, ssid, signal, onProgress);
           postcondition = `Android confirms connection to Wi-Fi ${ssid}; Internet access not verified`;
           break;
         }
         if (action.target === 'wifi_on') {
-          if (!developmentPolicyEnabled() && !this.accounting?.wifiOnConfirmed) throw new AndroidExecutionError('CONFIG_ERROR', 'Wi-Fi on requires explicit device-bound confirmation.');
+          if (!this.accounting?.wifiOnConfirmed) throw new AndroidExecutionError('CONFIG_ERROR', 'Wi-Fi on requires explicit device-bound confirmation.');
           snapshot = await setWifiEnabled(this.session, this.observer, this.run, true, signal);
           postcondition = 'Wi-Fi ON verified by native switch and Android wifi_on=1';
           break;
@@ -200,7 +265,7 @@ export class ConditionExecutor {
           break;
         }
         if (action.target === 'wifi_off') {
-          if (!developmentPolicyEnabled() && !this.accounting?.wifiOffConfirmed) throw new AndroidExecutionError('CONFIG_ERROR', 'Wi-Fi off requires explicit device-bound confirmation.');
+          if (!this.accounting?.wifiOffConfirmed) throw new AndroidExecutionError('CONFIG_ERROR', 'Wi-Fi off requires explicit device-bound confirmation.');
           snapshot = await disableWifi(this.session, this.observer, this.run, signal);
           postcondition = 'Wi-Fi OFF verified by native switch and Android wifi_on=0';
           break;
@@ -226,6 +291,7 @@ export class ConditionExecutor {
         let found = result.found!;
         selection = result.selection;
         if (this.expectedPackage && found.snapshot.foregroundPackage !== this.expectedPackage && !this.accounting?.allowedPackage?.(found.snapshot.foregroundPackage)) throw new AndroidExecutionError('UNKNOWN', 'Foreground app changed before interaction.');
+        if ([found.node.text, found.node.description, found.node.resourceId].some(forbiddenDispatchControl)) throw new AndroidExecutionError('CONFIG_ERROR', 'HARD_BLOCKED: excluded observed control.');
         assertObservedControlSafe(found.node);
         if (found.owner) assertObservedControlSafe(found.owner);
         preconditions.push('unique native element', 'visible and enabled', 'clickable element or validated clickable owner', 'activation point within viewport and not covered by another control');
@@ -245,8 +311,14 @@ export class ConditionExecutor {
         interaction = { method: found.interaction?.method ?? 'ELEMENT_CLICK', resourceId: found.node.resourceId, className: found.node.className,
           bounds: [...found.node.bounds], evidence: found.interaction?.evidence ?? ['unique observed native element'] };
         let policyVerification: boolean | undefined;
-        const verify = (state: Observation) => (policyVerification = this.accounting?.verifyAction?.(action, found.snapshot, state)) ??
-          (result.selection ? verifyDiscoveredSelection(result.selection, found.snapshot, state) : verifyClickTransition(found.snapshot, state, action.target));
+        const verify = (state: Observation) => {
+          if (result.selection?.itemType === 'video' && this.accounting?.requirePlayback) {
+            policyVerification = undefined;
+            return Boolean(state.playback && verifyDiscoveredSelection(result.selection, found.snapshot, state));
+          }
+          return (policyVerification = this.accounting?.verifyAction?.(action, found.snapshot, state)) ??
+            (result.selection ? verifyDiscoveredSelection(result.selection, found.snapshot, state) : verifyClickTransition(found.snapshot, state, action.target));
+        };
         if (verify(found.snapshot) !== undefined) {
           const verifyStarted = performance.now() - start;
           const verifyBudget = result.selection ? Math.max(1, explorationConfig().timeoutMs - verifyStarted) : 20000;
@@ -371,6 +443,7 @@ export class ConditionExecutor {
 }
 
 export async function createExecutionContext(serial: string, actions: Action[], run: AdbRunner, signal?: AbortSignal, accounting?: ExecutionAccounting) {
+  for (const action of actions) assertSafeAction(action);
   if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(serial)) throw new AndroidExecutionError('CONFIG_ERROR', 'Invalid device serial.');
   const backend = process.env.ANDROID_EXECUTOR_BACKEND ?? 'appium';
   if (!['adb', 'appium'].includes(backend)) throw new AndroidExecutionError('CONFIG_ERROR', 'ANDROID_EXECUTOR_BACKEND must be appium or adb.');
@@ -384,7 +457,7 @@ export async function createExecutionContext(serial: string, actions: Action[], 
     await legacy.preflight(serial, actions, backend === 'adb', backend === 'appium');
     checkCancellation(signal);
     if (backend === 'appium') {
-      session = new ManagedAppiumSession(new AppiumClient(), serial, run);
+      session = new ManagedAppiumSession(new AppiumClient(undefined, fetch, accounting?.onRpc), serial, run, undefined, undefined, accounting?.expectedPhysicalId, accounting?.observerIdleTimeoutMs);
       await session.open(signal);
       await release.recordSession(session.sessionId!, accounting?.executionId);
       executor = new ConditionExecutor(session, run, accounting);
@@ -396,6 +469,44 @@ export async function createExecutionContext(serial: string, actions: Action[], 
   }
   return {
     backend,
+    sessionId: () => session?.sessionId,
+    async settleV2(success: boolean) { return session ? settleIntentMutations(session, success) : undefined; },
+    async temporalInventoryV2(packageName: string, request: TemporalRequest, signal?: AbortSignal) {
+      if (!executor || closed) throw Error('SESSION_ERROR: temporal preflight requires the original owned Session.');
+      return executor.temporalInventoryV2(packageName, request, signal);
+    },
+    async temporalUiInventoryV2(packageName: string, request: TemporalRequest, signal?: AbortSignal) {
+      if (!executor || closed) throw Error('SESSION_ERROR: UI temporal inventory requires the original owned Session.');
+      return executor.temporalUiInventoryV2(packageName, request, signal);
+    },
+    async temporalCorroborateV2(proof: TemporalUiProof, signal?: AbortSignal) {
+      if (!executor || closed) throw Error('SESSION_ERROR: temporal corroboration requires original Session.');
+      return executor.temporalCorroborateV2(proof, signal);
+    },
+    async temporalV2(grant: TemporalEffectGrant, before: TemporalInventory, signal?: AbortSignal) {
+      if (!executor || closed) throw Error('SESSION_ERROR: temporal effect requires the original owned Session.');
+      return executor.temporalV2(grant, before, signal);
+    },
+    async viewMediaV2(grant: MediaViewGrant, signal?: AbortSignal) {
+      if (!executor || closed) throw new AndroidExecutionError('SESSION_ERROR', 'Media viewing requires the owned active Session.');
+      return executor.viewMediaV2(grant, signal);
+    },
+    async interactV2(grant: EffectGrant, signal?: AbortSignal): Promise<Observation> {
+      if (!executor || closed) throw new AndroidExecutionError('SESSION_ERROR', 'V2 interaction requires the original active Appium context.');
+      return executor.interactV2(grant, signal);
+    },
+    async launchDiscoveredV2(app: DiscoveredApplication, signal?: AbortSignal) {
+      if (!executor || closed) throw Error('SESSION_ERROR: camera launch requires the owned active Session.');
+      return executor.launchDiscoveredV2(app, signal);
+    },
+    async captureKeyV2(grant: EffectGrant, permit: CameraFallbackPermit, signal?: AbortSignal) {
+      if (!executor || closed) throw Error('SESSION_ERROR: camera fallback requires the owned active Session.');
+      return executor.captureKeyV2(grant, permit, signal);
+    },
+    async intentV2(approval: IntentApproval, binding: IntentBinding, span: { start: number; end: number }, executionId: string, packageName: string, signal?: AbortSignal, owner?: OwnerTestExecution) {
+      if (!executor || closed) throw new AndroidExecutionError('SESSION_ERROR', 'Intent requires the original owned active Session.');
+      return executor.intentV2(approval, binding, span, executionId, packageName, signal, owner);
+    },
     discoveryMemory() { return executor?.discoveryMemory() ?? { anchored: false, items: [] }; },
     async confirmVisualTap(choice: HumanTapChoice, plan: ActionPlan, signal?: AbortSignal): Promise<ActionOutcome> {
       if (!executor || closed) throw new AndroidExecutionError('SESSION_ERROR', 'Visual confirmation requires the original active Appium Session.');
@@ -406,6 +517,7 @@ export async function createExecutionContext(serial: string, actions: Action[], 
       return executor.observe(signal);
     },
     async execute(action: Action, signal?: AbortSignal, onProgress?: (value: ObserverProgress) => void): Promise<ActionOutcome> {
+      assertSafeAction(action);
       if (closed) throw new AndroidExecutionError('SESSION_ERROR', 'Execution context is closed.');
       if (executor) return executor.execute(action, signal, onProgress);
       checkCancellation(signal);
@@ -417,10 +529,10 @@ export async function createExecutionContext(serial: string, actions: Action[], 
     },
     async close() {
       if (closed) return;
-      await session?.close();
-      await release();
-      executor?.dispose();
-      closed = true;
+      let settlementError;
+      try { if (session) await settleIntentMutations(session, false); } catch (error) { settlementError = error; }
+      await session?.close(); await release(); executor?.dispose(); closed = true;
+      if (settlementError) throw settlementError;
     },
   };
 }

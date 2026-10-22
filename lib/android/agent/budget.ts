@@ -3,14 +3,20 @@ import { randomUUID } from 'node:crypto';
 
 export class AgentLimitError extends Error {}
 export interface ReasoningMeasurement {
+  provider?: string; sentFields?: string[]; fallbackReason?: string; httpStatus?: number; proposedChoice?: string;
   model: string; elapsedMs: number; responseMs?: number; loadMs?: number; promptTokens?: number;
-  outputTokens?: number; evalMs?: number; status: 'VALID' | 'TIMEOUT' | 'HTTP_ERROR' | 'INVALID_JSON' | 'UNAVAILABLE' | 'CANCELLED';
+  queueWaitMs?: number; serviceMs?: number; deadlineRemainingMs?: number;
+  promptByteUpperBound?: number;
+  outputTokens?: number; evalMs?: number; status: 'VALID' | 'TIMEOUT' | 'HTTP_ERROR' | 'INVALID_JSON' | 'UNAVAILABLE' | 'CANCELLED' | 'CONTEXT_LIMIT';
 }
 export class AgentBudget {
+  readonly measurements: { layer: 'ADB' | 'APPIUM' | 'XML' | 'CATALOG'; kind: string; elapsedMs: number; offsetMs: number }[] = [];
+  measure(layer: 'ADB' | 'APPIUM' | 'XML' | 'CATALOG', kind: string, elapsedMs: number) { if (this.measurements.length < 1024) this.measurements.push({ layer, kind, elapsedMs, offsetMs: performance.now() - this.started }); }
   readonly queueOwner = randomUUID();
-  runtimeIdentity?: { executionId: string; deviceId: string };
+  runtimeIdentity?: { executionId: string; deviceId: string; physicalId?: string };
   readonly reasoningMeasurements: ReasoningMeasurement[] = [];
   readonly snapshotSources: Record<string, number> = {};
+  readonly profiling = { rpcCount: 0, rpcMs: 0, sourceRpcMs: 0, elementRpcMs: 0, parseCount: 0, parseMs: 0, groundingMs: 0, adbCount: 0, adbMs: 0, singletonClausesSkipped: 0, singletonCandidatesSkipped: 0 };
   readonly webVerification: { phase: string; urlMatches?: boolean; titleMatches?: boolean; ready?: boolean; pageError?: boolean; changed?: boolean }[] = [];
   readonly limits: AgentLimits;
   readonly started = performance.now();
@@ -25,5 +31,5 @@ export class AgentBudget {
     this.counters[kind]++;
   }
   recordSnapshot(source = 'UNATTRIBUTED') { this.consume('snapshots'); this.snapshotSources[source] = (this.snapshotSources[source] ?? 0) + 1; }
-  summary() { this.timings.totalMs = Math.round(performance.now() - this.started); return { counters: { ...this.counters }, timings: { ...this.timings }, reasoningMeasurements: this.reasoningMeasurements.map(row => ({ ...row })), snapshotSources: { ...this.snapshotSources }, webVerification: this.webVerification.slice(-24) }; }
+  summary() { this.timings.totalMs = Math.round(performance.now() - this.started); return { counters: { ...this.counters }, timings: { ...this.timings }, reasoningMeasurements: this.reasoningMeasurements.map(row => ({ ...row })), measurements: this.measurements.slice(), snapshotSources: { ...this.snapshotSources }, webVerification: this.webVerification.slice(-24), profiling: { ...this.profiling } }; }
 }

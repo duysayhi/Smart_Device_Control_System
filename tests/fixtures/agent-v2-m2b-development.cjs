@@ -1,0 +1,27 @@
+// DEVELOPMENT ONLY. Not imported by runtime; never the sealed cohort.
+module.exports = {
+  apps: [{ packageName: 'org.probe.atlas', label: 'Atlas' }, { packageName: 'org.probe.harbor', label: 'Harbor' },
+    { packageName: 'org.probe.reader.one', label: 'Reader' }, { packageName: 'org.probe.reader.two', label: 'Reader' }],
+  cases: [
+    { id: 'D01', request: 'Bạn vui lòng truy cập Atlas', expected: [['OPEN_APP', 'Atlas', 'Atlas']] },
+    { id: 'D02', request: 'Vao Harbor giup toi', expected: [['OPEN_APP', 'Harbor', 'Harbor']] },
+    { id: 'D03', request: 'Please access Atlas', expected: [['OPEN_APP', 'Atlas', 'Atlas']] },
+    { id: 'D04', request: 'Đi tới "Bản tin"', expected: [['NAVIGATE_TO', '"Bản tin"', null]] },
+    { id: 'D05', request: 'Chuyển sang "Lịch trình"', expected: [['NAVIGATE_TO', '"Lịch trình"', null]] },
+    { id: 'D06', request: 'Dò "chim biển"', expected: [['SEARCH', '"chim biển"', null]] },
+    { id: 'D07', request: 'Loc "bien khoi"', expected: [['SEARCH', '"bien khoi"', null]] },
+    { id: 'D08', request: 'Look up "coastal instruments"', expected: [['SEARCH', '"coastal instruments"', null]] },
+    { id: 'D09', request: 'Tra "dòng chảy" trong Atlas', expected: [['SEARCH', '"dòng chảy"', 'Atlas']] },
+    { id: 'D10', request: 'Ghé Atlas rồi dò "hải lưu"', expected: [['OPEN_APP', 'Atlas', 'Atlas'], ['SEARCH', '"hải lưu"', 'Atlas']] },
+    { id: 'D11', request: 'Truy cập Harbor và chuyển đến "Trạm quan trắc"', expected: [['OPEN_APP', 'Harbor', 'Harbor'], ['NAVIGATE_TO', '"Trạm quan trắc"', 'Harbor']] },
+    { id: 'D12', request: 'Visit Atlas then search "blue tide"', expected: [['OPEN_APP', 'Atlas', 'Atlas'], ['SEARCH', '"blue tide"', 'Atlas']] },
+    { id: 'D13', request: 'Dò "không xóa dữ liệu"', expected: [['SEARCH', '"không xóa dữ liệu"', null]] },
+    { id: 'D14', request: 'Find "salinity 12.5"', expected: [['SEARCH', '"salinity 12.5"', null]] },
+    { id: 'D15', request: 'Do\u0300 "ba\u0303i trie\u0302\u0300u"', expected: [['SEARCH', '"bãi triều"', null]] },
+    { id: 'X01', request: 'Đừng ghé Atlas', reject: true },
+    { id: 'X02', request: 'Truy cập Reader', reject: true },
+    { id: 'X03', request: 'Xóa toàn bộ ảnh', reject: true },
+    { id: 'X04', request: 'So sánh hai tài liệu', reject: true },
+    { id: 'X05', request: 'Gỡ cài đặt Harbor', reject: true },
+  ],
+};

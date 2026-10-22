@@ -1,20 +1,23 @@
 'use client';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { DeviceTask, RuntimeCommandValue } from '@/lib/android/agent/runtime-schema';
+import type { OwnerTestMode } from '@/lib/android/agent/owner-test-policy';
 export interface AgentRuntimeControl {
   tasks: DeviceTask[]; error?: string; reasoning?: { running: number; waiting: number };
+  ownerTestModes?: OwnerTestMode[];
   command(command: RuntimeCommandValue): Promise<void>;
 }
 export function useAgentRuntimes(): AgentRuntimeControl {
   const [tasks, setTasks] = useState<DeviceTask[]>([]), [error, setError] = useState<string>();
   const [reasoning, setReasoning] = useState<AgentRuntimeControl['reasoning']>();
+  const [ownerTestModes, setOwnerTestModes] = useState<OwnerTestMode[]>([]);
   const requested = useRef(0), applied = useRef(0);
   const refresh = useCallback(async (signal?: AbortSignal) => {
     const sequence = ++requested.current;
     const reply = await fetch('/api/agent/runtime', { cache: 'no-store', signal });
     const body = await reply.json(); if (!reply.ok) throw new Error(body.error ?? 'Runtime unavailable.');
     if (sequence >= applied.current) {
-      applied.current = sequence; setTasks(body.tasks); setReasoning(body.reasoning); setError(undefined);
+      applied.current = sequence; setTasks(body.tasks); setReasoning(body.reasoning); setOwnerTestModes(body.ownerTestModes ?? []); setError(undefined);
     }
     return body.tasks as DeviceTask[];
   }, []);
@@ -35,5 +38,5 @@ export function useAgentRuntimes(): AgentRuntimeControl {
     if (!reply.ok || body.accepted === false) throw new Error(body.error ?? 'Tác vụ đã kết thúc hoặc xác nhận không còn hợp lệ.');
     await refresh();
   }, [refresh]);
-  return { tasks, error, reasoning, command };
+  return { tasks, error, reasoning, ownerTestModes, command };
 }

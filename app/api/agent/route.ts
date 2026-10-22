@@ -2,11 +2,11 @@ import { z } from 'zod';
 import { randomUUID } from 'node:crypto';
 import { workerRequest } from '@/lib/android/agent/worker-client';
 import { terminalTask, type DeviceTask } from '@/lib/android/agent/runtime-schema';
-import { isLocalSameOrigin } from '@/lib/android/agent/request-origin';
+import { isLocalMutation } from '@/lib/android/agent/request-origin';
 
 // Retain NDJSON compatibility. Viewer disconnects do not cancel device ownership.
 export async function POST(request: Request) {
-  if (!isLocalSameOrigin(request)) return Response.json({ error: 'Origin không hợp lệ.' }, { status: 403 });
+  if (!isLocalMutation(request)) return Response.json({ error: 'Origin không hợp lệ.' }, { status: 403 });
   const input = z.object({ deviceId: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/), goal: z.string().trim().min(1).max(2000) }).strict().safeParse(await request.json().catch(() => null));
   if (!input.success) return Response.json({ error: 'Goal hoặc serial không hợp lệ.' }, { status: 400 });
   try {
