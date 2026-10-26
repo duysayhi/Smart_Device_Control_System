@@ -4,6 +4,7 @@ export const capabilityRegistry = {
   LAUNCH: { effect: 'READ', predicates: ['FOREGROUND_IS'], affordances: [], executable: true },
   NAVIGATE: { effect: 'READ', predicates: ['ELEMENT_VISIBLE'], affordances: ['navigation'], executable: true },
   SEARCH: { effect: 'READ', predicates: ['SEARCH_OUTCOME_MATCHES'], affordances: ['editable', 'search'], executable: true },
+  OPEN_RESULT: { effect: 'READ', predicates: ['BROWSER_RESULT_MATCHES'], affordances: ['browser_organic'], executable: true },
   CALCULATE: { effect: 'LOCAL_WRITE', predicates: ['VALUE_EQUALS'], affordances: ['editable', 'clickable'], executable: true },
   CREATE_RECORD: { effect: 'LOCAL_WRITE', predicates: ['RECORD_READBACK_MATCHES'], affordances: ['editable', 'save'], executable: true },
   CAPTURE_MEDIA: { effect: 'LOCAL_WRITE', predicates: ['ARTIFACT_EXISTS'], affordances: ['capture'], executable: true },

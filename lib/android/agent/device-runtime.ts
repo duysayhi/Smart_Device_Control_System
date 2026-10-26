@@ -17,6 +17,9 @@ import { androidV2Adapter, runAgentV2, type V2Adapter } from './agent-v2';
 import { submitAssistanceV2 } from './human-assistance-v2';
 import { OwnerTestPolicy, assertOwnerTestExecution, type OwnerTestExecution, type OwnerTestMode } from './owner-test-policy';
 import { decidePermission } from './permission-decision';
+import { prepareV2, type PreparedV2 } from './prepared-v2';
+import type { PreparedView } from '../unified-agent/contracts';
+import { requireDemoCapabilities } from '../unified-agent/demo-catalog';
 
 export interface RuntimeAdapter {
   v2?(serial: string, budget: AgentBudget): V2Adapter;
@@ -40,8 +43,49 @@ export const androidRuntimeAdapter: RuntimeAdapter = {
   },
   open: (goal, budget, serial, signal) => createAgentExecution(goal, budget, serial, runAdb, signal),
 };
-interface RuntimeEntry { task: DeviceTask; controller: AbortController; done?: Promise<void>; memory?: unknown; disconnected: boolean; ownerScope?: OwnerTestExecution }
+interface PreparedEntry { source: string; deviceId: string; physicalId: string; engine: 'V1' | 'V2'; expiresAt: number; ownerId?: string; goal?: AgentGoal; v2?: PreparedV2 }
+interface RuntimeEntry { task: DeviceTask; controller: AbortController; done?: Promise<void>; memory?: unknown; disconnected: boolean; ownerScope?: OwnerTestExecution; prepared?: PreparedEntry }
 export class DeviceRuntimeRegistry {
+  private prepared = new Map<string, PreparedEntry>();
+  async prepare(source: string, deviceId: string, engine: 'V1' | 'V2'): Promise<PreparedView> {
+    if (decidePermission({ source, stage: 'REQUEST' }).decision === 'DENY') throw Error('HARD_DENY: no preparation authorized.');
+    requireDemoCapabilities(source);
+    const device = (await this.adapter.discover()).find(d => d.serial === deviceId && d.status === 'device' && d.identityVerified && d.physicalId);
+    if (!device?.physicalId || this.activeByPhysical.has(device.physicalId)) throw Error('Device must be verified and idle before analysis.');
+    const budget = new AgentBudget(), signal = AbortSignal.timeout(budget.limits.timeMs);
+    const ownerId = this.ownerPolicy.list().find(m => m.deviceId === deviceId && m.physicalId === device.physicalId)?.id;
+    const entry: PreparedEntry = { source, deviceId, physicalId: device.physicalId, engine, expiresAt: 0, ownerId };
+    if (engine === 'V1') entry.goal = await this.adapter.plan(source, budget, signal, deviceId);
+    else {
+      const adapter = this.adapter.v2?.(deviceId, budget) ?? (this.adapter === androidRuntimeAdapter ? androidV2Adapter(deviceId, budget) : undefined);
+      if (!adapter) throw Error('V2 adapter unavailable.');
+      entry.v2 = await prepareV2(source, deviceId, adapter, budget, signal);
+      for (const node of entry.v2.graph.nodes) {
+        if (node.outcome.intent?.request.name === 'READ_STATE') continue;
+        const app = node.outcome.temporal ? await adapter.resolveTemporalApp?.(node.outcome.temporal, signal) : node.outcome.intent ? await adapter.resolveIntentApp?.(node.outcome.intent.request, signal) : (await adapter.catalog.resolve(node.app, node.capability, signal)).app;
+        if (!app || app.serial !== deviceId) throw Error('ASK: application or capability handler is missing or ambiguous.');
+      }
+    }
+    if (entry.goal?.originalRequest !== source && engine === 'V1') throw Error('Prepared source mismatch.');
+    budget.timings.planningMs = performance.now() - budget.started;
+    const reference = randomUUID(); entry.expiresAt = Date.now() + 90000;
+    for (const [id, old] of this.prepared) if (old.expiresAt <= Date.now()) this.prepared.delete(id);
+    if (this.prepared.size >= 100) throw Error('Too many pending plans.');
+    this.prepared.set(reference, entry);
+    return { reference, expiresAt: entry.expiresAt, summary: entry.v2?.summary ?? source, metrics: budget.summary(),
+      steps: entry.goal?.subgoals.map(s => s.description) ?? entry.v2!.graph.nodes.map(n => n.outcome.span.text),
+      confirmations: engine === 'V2' ? ['Existing interpretation/effect confirmation and Human Assistance remain enforced by V2.'] : ['Existing independent policy and native/DOM postconditions.'] };
+  }
+  async startPrepared(reference: string): Promise<DeviceTask[]> {
+    const entry = this.prepared.get(reference);
+    if (!entry || entry.expiresAt <= Date.now()) throw Error('Plan expired, used or lost after restart; analyze again.');
+    const device = (await this.adapter.discover()).find(d => d.serial === entry.deviceId && d.status === 'device' && d.identityVerified && d.physicalId === entry.physicalId);
+    const ownerId = this.ownerPolicy.list().find(m => m.deviceId === entry.deviceId && m.physicalId === entry.physicalId)?.id;
+    if (!device || ownerId !== entry.ownerId || Date.now() >= entry.expiresAt || this.prepared.get(reference) !== entry) throw Error('Plan device, permission, expiry or replay binding changed.');
+    this.prepared.delete(reference);
+    return this.start({ type: 'START', requestId: reference, jobs: [{ deviceId: entry.deviceId, goal: entry.source,
+      ...(entry.engine === 'V2' ? { agentVersion: 2, ...(ownerId ? { ownerAuthorizedTest: true } : {}) } : {}) }] }, entry);
+  }
   private readonly ownerPolicy = new OwnerTestPolicy();
   ownerTestModes() { return this.ownerPolicy.list(); }
   ownerPolicyAudit() { return this.ownerPolicy.history(); }
@@ -104,15 +148,18 @@ export class DeviceRuntimeRegistry {
     }
     return devices;
   }
-  async start(input: Extract<RuntimeCommandValue, { type: 'START' }>): Promise<DeviceTask[]> {
+  async start(input: Extract<RuntimeCommandValue, { type: 'START' }>, prepared?: PreparedEntry): Promise<DeviceTask[]> {
     const existing = this.requests.get(input.requestId), jobsKey = JSON.stringify(input.jobs);
     if (existing) {
       if (existing.jobs !== jobsKey) throw new Error('Request ID cannot be reused for different jobs.');
       return existing.ids.map(id => structuredClone(this.entries.get(id)!.task));
     }
+    // Existing hard-deny requests retain their zero-effect BLOCKED audit task.
+    // Validate every other job before discovery or scheduling any part of a batch.
+    for (const job of input.jobs) if (decidePermission({ source: job.goal, stage: 'REQUEST' }).decision !== 'DENY') requireDemoCapabilities(job.goal);
     const devices = await this.adapter.discover();
     // Discovery can yield; check idempotency again before the atomic scheduling section.
-    if (this.requests.has(input.requestId)) return this.start(input);
+    if (this.requests.has(input.requestId)) return this.start(input, prepared);
     const serials = input.jobs.map(job => job.deviceId);
     if (new Set(serials).size !== serials.length) throw new Error('A batch cannot contain the same device twice.');
     const physicalIds = serials.map(serial => devices.find(d => d.serial === serial)?.physicalId ?? serial);
@@ -129,6 +176,8 @@ export class DeviceRuntimeRegistry {
       const device = devices.find(d => d.serial === job.deviceId)!;
       if (job.agentVersion !== 2 || !device.identityVerified || !device.physicalId || !this.ownerPolicy.list().some(mode => mode.deviceId === job.deviceId && mode.physicalId === device.physicalId)) throw Error('Owner test mode is not enabled for this exact verified V2 device.');
     }
+    if (prepared && (prepared.expiresAt <= Date.now() || input.jobs.length !== 1 || input.jobs[0].goal !== prepared.source || input.jobs[0].deviceId !== prepared.deviceId ||
+      devices.find(d => d.serial === prepared.deviceId)?.physicalId !== prepared.physicalId || this.ownerPolicy.list().find(m => m.deviceId === prepared.deviceId && m.physicalId === prepared.physicalId)?.id !== prepared.ownerId)) throw Error('Prepared plan changed before scheduling.');
     this.prune();
     const created = input.jobs.map(job => {
       const device = devices.find(d => d.serial === job.deviceId)!;
@@ -136,7 +185,7 @@ export class DeviceRuntimeRegistry {
         connectionMode: device.connectionType, request: job.goal, ...(job.agentVersion ? { agentVersion: job.agentVersion } : {}), status: 'QUEUED', createdAt: Date.now(), connectionState: 'device', events: [] };
       const ownerScope = job.ownerAuthorizedTest ? this.ownerPolicy.bind(task.deviceId, task.physicalId!, task.executionId) : undefined;
       if (ownerScope) task.ownerTestMode = this.ownerPolicy.list().find(mode => mode.id === ownerScope.id);
-      const entry: RuntimeEntry = { task, controller: new AbortController(), disconnected: false, ownerScope };
+      const entry: RuntimeEntry = { task, controller: new AbortController(), disconnected: false, ownerScope, prepared };
       return entry;
     });
     for (const entry of created) {
@@ -207,10 +256,10 @@ export class DeviceRuntimeRegistry {
       if (task.agentVersion === 2) {
         const adapter = this.adapter.v2?.(task.deviceId, budget) ?? (this.adapter === androidRuntimeAdapter ? androidV2Adapter(task.deviceId, budget) : undefined);
         if (!adapter) throw new Error('No V2 runtime adapter is registered.');
-        await runAgentV2(task.request, task.deviceId, task.executionId, task.physicalId ?? task.deviceId, budget, adapter, publish, signal, undefined, entry.ownerScope);
+        await runAgentV2(task.request, task.deviceId, task.executionId, task.physicalId ?? task.deviceId, budget, adapter, publish, signal, undefined, entry.ownerScope, entry.prepared?.v2);
         return;
       }
-      const planStart = performance.now(), goal = await this.adapter.plan(task.request, budget, signal, task.deviceId);
+      const planStart = performance.now(), goal = entry.prepared?.goal ?? await this.adapter.plan(task.request, budget, signal, task.deviceId);
       budget.timings.planningMs = Math.round(performance.now() - planStart); checkCancellation(signal);
       const setupStart = performance.now(); execution = await this.adapter.open(goal, budget, task.deviceId, signal);
       const owned = execution;

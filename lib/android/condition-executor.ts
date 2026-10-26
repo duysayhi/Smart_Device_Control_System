@@ -142,14 +142,14 @@ export class ConditionExecutor {
     armCameraKey(grant);
     return executeGroundedInteraction(this.session, this.observer, grant, signal);
   }
-  async intentV2(approval: IntentApproval, binding: IntentBinding, span: { start: number; end: number }, executionId: string, packageName: string, signal?: AbortSignal, owner?: OwnerTestExecution) {
+  async intentV2(approval: IntentApproval, binding: IntentBinding, span: { start: number; end: number }, executionId: string, packageName: string | undefined, signal?: AbortSignal, owner?: OwnerTestExecution) {
     return executeIntentCapability(this.session, this.observer, this.run, approval, binding, span, executionId, packageName, signal, owner);
   }
   async temporalInventoryV2(packageName: string, request: TemporalRequest, signal?: AbortSignal) {
     return temporalInventory(this.session, this.run, packageName, request, signal);
   }
   async temporalUiInventoryV2(packageName: string, request: TemporalRequest, signal?: AbortSignal) {
-    return readTemporalUiInventory(this.session, this.observer, this.run, packageName, request, signal, this.accounting);
+    return readTemporalUiInventory(this.session, this.observer, this.run, packageName, request, signal, this.accounting, { scrollTarget: 'NATIVE_ELEMENT' });
   }
   async temporalCorroborateV2(proof: TemporalUiProof, signal?: AbortSignal) {
     return withSessionContextLock(this.session, async () => {
@@ -312,11 +312,12 @@ export class ConditionExecutor {
           bounds: [...found.node.bounds], evidence: found.interaction?.evidence ?? ['unique observed native element'] };
         let policyVerification: boolean | undefined;
         const verify = (state: Observation) => {
+          policyVerification = this.accounting?.verifyAction?.(action, found.snapshot, state);
+          if (policyVerification === false) return false;
           if (result.selection?.itemType === 'video' && this.accounting?.requirePlayback) {
-            policyVerification = undefined;
             return Boolean(state.playback && verifyDiscoveredSelection(result.selection, found.snapshot, state));
           }
-          return (policyVerification = this.accounting?.verifyAction?.(action, found.snapshot, state)) ??
+          return policyVerification ??
             (result.selection ? verifyDiscoveredSelection(result.selection, found.snapshot, state) : verifyClickTransition(found.snapshot, state, action.target));
         };
         if (verify(found.snapshot) !== undefined) {
@@ -328,7 +329,7 @@ export class ConditionExecutor {
           try {
             snapshot = await this.observer.waitUntil(async (state, remaining) => {
               const verified = verify(state);
-              if (verified || (policyVerification === undefined && result.selection &&
+              if (verified || (policyVerification !== false && result.selection &&
                 await mediaVerify(result.selection, found.snapshot, state, remaining, signal))) return state;
               return false;
             }, `postcondition:${action.target}`, verifyBudget, signal, progress => {
@@ -503,7 +504,7 @@ export async function createExecutionContext(serial: string, actions: Action[], 
       if (!executor || closed) throw Error('SESSION_ERROR: camera fallback requires the owned active Session.');
       return executor.captureKeyV2(grant, permit, signal);
     },
-    async intentV2(approval: IntentApproval, binding: IntentBinding, span: { start: number; end: number }, executionId: string, packageName: string, signal?: AbortSignal, owner?: OwnerTestExecution) {
+    async intentV2(approval: IntentApproval, binding: IntentBinding, span: { start: number; end: number }, executionId: string, packageName: string | undefined, signal?: AbortSignal, owner?: OwnerTestExecution) {
       if (!executor || closed) throw new AndroidExecutionError('SESSION_ERROR', 'Intent requires the original owned active Session.');
       return executor.intentV2(approval, binding, span, executionId, packageName, signal, owner);
     },

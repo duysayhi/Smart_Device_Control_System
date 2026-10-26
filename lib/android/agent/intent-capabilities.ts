@@ -1,7 +1,8 @@
 import { randomUUID } from 'node:crypto';
 import { IntentRequestSchema, type IntentRequest, type IntentBinding } from './intent-schema';
 import { sourceSlots } from './source-slots';
-import { commandMask, foldIntent, OutcomeSpecV2Schema, type OutcomeSpecV2 } from './outcome-spec';
+import { commandMask, foldIntent, sourceClauseSpans, OutcomeSpecV2Schema, type OutcomeSpecV2 } from './outcome-spec';
+import { politeWords } from './natural-phrasing';
 
 export interface IntentCapability {
   name: IntentRequest['name']; effect: 'READ_ONLY' | 'NON_PERSISTING' | 'PERSISTING';
@@ -19,20 +20,60 @@ export const intentCapabilities: Readonly<Record<IntentRequest['name'], IntentCa
 for (const contract of Object.values(intentCapabilities)) { Object.freeze(contract.requiredGrants); Object.freeze(contract); }
 const scalar = (text: string) => text.startsWith('"') ? JSON.parse(text) as string : text;
 
+const readStateAliases = {
+  battery: ['battery', 'pin'], wifi: ['wi-fi', 'wi fi', 'wifi'], bluetooth: ['bluetooth'],
+  brightness: ['brightness', 'screen brightness', 'do sang', 'do sang man hinh'],
+  media_volume: ['media_volume', 'media volume', 'am luong media', 'am luong da phuong tien'],
+  ring_volume: ['ring_volume', 'ring volume', 'ringtone volume', 'am luong chuong'],
+  dnd: ['dnd', 'do not disturb', 'khong lam phien'], rotation: ['rotation', 'auto rotation', 'xoay man hinh'],
+  flashlight: ['flashlight', 'torch', 'den pin'], airplane: ['airplane', 'airplane mode', 'che do may bay'],
+} as const;
+
+// Read bindings use a single whole-clause slot, independent of model value
+// slots. Only this closed grammar can derive the enum from the exact source.
+export function matchReadStateSource(text: string): IntentBinding | undefined {
+  const command = foldIntent(text).replace(/[.!?]+$/, '').trim().replace(new RegExp('^(?:(?:' + politeWords + ')\\s+)+'), '');
+  for (const [state, aliases] of Object.entries(readStateAliases)) {
+    const label = '(?:' + [...aliases].sort((a, b) => b.length - a.length).join('|') + ')';
+    const numeric = ['battery', 'brightness', 'media_volume', 'ring_volume'].includes(state);
+    const status = '(?:status|state|trang thai)';
+    const measure = numeric ? '(?:level|percentage|remaining|con bao nhieu|con lai bao nhieu|bao nhieu|muc|phan tram)' : '(?:on or off|enabled or disabled|dang bat hay tat|bat hay tat)';
+    const subject = '(?:the )?(?:current |trang thai )?' + label;
+    const tail = '(?: (?:' + status + '|' + measure + '))?(?: (?:now|currently|hien tai))?';
+    const patterns = [
+      '^(?:read|check|show(?: me)?|tell me|doc|kiem tra|xem|biet) ' + subject + tail + '$',
+      '^(?:what is|what\'s) ' + subject + tail + '$',
+      '^' + subject + ' (?:' + status + '|' + measure + ')(?: (?:now|currently|hien tai))?$',
+    ];
+    if (numeric) patterns.push('^how much ' + subject + '(?: (?:is )?(?:left|remaining))?$');
+    else patterns.push(
+      '^is ' + subject + ' (?:currently )?(?:on(?: or off)?|off|enabled(?: or disabled)?|disabled)$',
+      '^(?:tell me|check) whether ' + subject + ' is (?:on or off|enabled or disabled)$',
+      '^(?:(?:xem|biet|kiem tra) )?' + subject + ' co (?:dang )?bat khong$',
+    );
+    if (patterns.some(pattern => new RegExp(pattern).test(command))) {
+      const parsed = IntentRequestSchema.parse({ name: 'READ_STATE', args: { state } });
+      return { request: parsed, slots: { state: 1 } };
+    }
+  }
+}
+
 // Full-clause matching is deliberately closed. Unmatched language stays on the
 // existing reviewed UI/discovery path; a value cannot absorb another action.
 export function matchIntentSource(request: string, start: number, end: number): IntentBinding | undefined {
   const text = request.slice(start, end), folded = foldIntent(text);
+  const read = matchReadStateSource(text);
+  if (read) return read;
   if (/\b(delete|erase|wipe|uninstall|remove|reset|format|overwrite|send|call|xoa|gui|goi|ghi de|khong|never|don't|do not)\b/.test(commandMask(text))) return;
   const patterns: [IntentRequest['name'], RegExp, string[]][] = [
     ['OPEN_APP', /^(?:open(?: app)?|mo(?: ung dung)?) (\S+)$/, ['packageName']],
     ['OPEN_URL', /^(?:open url|mo url) ("[^"]+"|\S+)$/, ['url']],
     ['OPEN_DIALER', /^(?:open dialer|mo ban phim quay so) ("[^"]+"|\+?\d+)$/, ['number']],
     ['OPEN_SETTINGS', /^(?:open settings|mo man hinh cai dat) (\S+)$/, ['action']],
-    ['READ_STATE', /^(?:read|doc) (wifi|battery|media_volume|ring_volume|brightness|bluetooth|dnd|rotation|flashlight|airplane)$/, ['state']],
     ['COMPOSE_SMS', /^(?:compose sms|soan sms) (\+?\d+) ("[^"]+")$/, ['number', 'body']],
   ];
-  const plan = sourceSlots(text), clause = plan.clauses[0];
+  let plan; try { plan = sourceSlots(text); } catch { return; }
+  const clause = plan.clauses[0];
   if (plan.clauses.length !== 1) return;
   const setting = /^(?:set|dat) (wifi|bluetooth|dnd|rotation|brightness|media_volume|ring_volume|flashlight|airplane) (\d+)$/.exec(folded);
   if (setting) {
@@ -59,12 +100,13 @@ export function matchIntentSource(request: string, start: number, end: number): 
 }
 export function proposeIntentOutcomes(request: string): OutcomeSpecV2 | undefined {
   if (request !== request.normalize('NFC').trim()) return;
-  let plan; try { plan = sourceSlots(request); } catch { return; }
+  const clauses = sourceClauseSpans(request);
+  if (!clauses.length || clauses.length > 12) return;
   const outcomes = [];
-  for (const c of plan.clauses) {
+  for (const [index, c] of clauses.entries()) {
     let binding; try { binding = matchIntentSource(request, c.start, c.end); } catch { return; }
     if (!binding) return;
-    outcomes.push({ id: 'outcome-' + c.id, kind: 'INTENT' as const, span: { start: c.start, end: c.end, text: c.text },
+    outcomes.push({ id: 'outcome-' + (index + 1), kind: 'INTENT' as const, span: { start: c.start, end: c.end, text: c.text },
       value: c.text, negated: false, effect: binding.request.name === 'SET_DEVICE_STATE' ? 'LOCAL_WRITE' as const : 'READ' as const, ambiguity: [], intent: binding });
   }
   return OutcomeSpecV2Schema.parse({ version: 2, request, outcomes });

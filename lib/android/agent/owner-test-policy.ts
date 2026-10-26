@@ -3,6 +3,7 @@ import type { OutcomeV2 } from './outcome-spec';
 import { commandMask } from './outcome-spec';
 import type { GroundedCandidateV2 } from './grounded-candidates-v2';
 import { decidePermission } from './permission-decision';
+import { browserResultCandidateAllowed } from './browser-result';
 
 export const OWNER_AUTHORIZED_TEST_MODE = 'OWNER_AUTHORIZED_TEST_MODE' as const;
 export interface OwnerTestMode {
@@ -19,6 +20,7 @@ export function ownerCandidateNonDestructive(candidate: GroundedCandidateV2): bo
   if (target.sensitive || target.destructive) return false;
   if (candidate.effect === 'READ' && candidate.action === 'CLICK') {
     if (candidate.search) return true; // The search grant validates the backend-issued scope and exact phase.
+    if (candidate.browserResult) return browserResultCandidateAllowed(candidate);
     // A generic menu/item ID alone cannot prove that an unfamiliar command only navigates.
     return target.roles.includes('navigation') || /(?:\$Tab|\.Tab|TabWidget)$/.test(target.className) || /(?:^|[_:/.-])(?:nav|navigation|breadcrumb)(?:[_:/.-]|$)/.test(target.resourceId);
   }

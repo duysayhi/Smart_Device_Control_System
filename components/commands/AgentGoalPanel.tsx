@@ -12,6 +12,7 @@ interface Props {
   text: string; onText: (text: string) => void; devices: AndroidAdbDevice[]; serial: string;
   onSerial: (serial: string) => void; onRefresh: () => void; selectedDeviceIds: string[]; runtime: AgentRuntimeControl;
   inspectedExecutionId?: string;
+  controlsMode?: 'all' | 'results' | 'group';
 }
 const labels: Record<AgentProgress['status'], string> = {
   PLANNING: 'Đang lập mục tiêu', OBSERVING: 'Đang quan sát', DECIDING: 'Đang quyết định', EXECUTING: 'Đang thực thi',
@@ -52,7 +53,7 @@ export function NavigationProgressView({ event }: { event: AgentProgress }) {
     <p className="text-slate-500">{navigation.actionCount} bước điều hướng · {(navigation.navigationMs / 1000).toFixed(1)} s · Nhận diện {navigation.recognitionMs} ms</p>
   </div>;
 }
-export function AgentGoalPanel({ text, onText, devices, serial, onSerial, onRefresh, selectedDeviceIds, runtime, inspectedExecutionId }: Props) {
+export function AgentGoalPanel({ text, onText, devices, serial, onSerial, onRefresh, selectedDeviceIds, runtime, inspectedExecutionId, controlsMode = 'all' }: Props) {
   const [error, setError] = useState<{ deviceId: string; message: string }>(), [submitting, setSubmitting] = useState(false);
   const [point, setPoint] = useState<{ x: number; y: number; evidenceId: string }>();
   const [now, setNow] = useState(0);
@@ -86,7 +87,17 @@ export function AgentGoalPanel({ text, onText, devices, serial, onSerial, onRefr
       y: visual.image.crop[1] + point.y * (visual.image.crop[3] - visual.image.crop[1]) }));
     setPoint(undefined);
   }
+  if (controlsMode === 'group') return <section className="flex flex-wrap gap-2 items-center text-xs" aria-label="Legacy group execution">
+    <fieldset disabled={submitting || batchBlocked} aria-label="Engine chạy nhóm" className="flex flex-wrap items-center gap-3">
+      <legend className="mb-2 text-slate-500">Engine chạy nhóm</legend>
+      <label className="flex items-center gap-1.5"><input type="radio" name="group-agent-version" checked={version === 1} onChange={() => setVersion(1)} className="accent-indigo-600" />Agent V1</label>
+      <label className="flex items-center gap-1.5"><input type="radio" name="group-agent-version" checked={version === 2} onChange={() => setVersion(2)} className="accent-indigo-600" />Agent V2</label>
+    </fieldset>
+    <button type="button" onClick={() => void start(selected)} disabled={submitting || selected.length < 2 || batchBlocked || !text.trim()} className="flex gap-2 items-center border rounded-md p-2 disabled:opacity-50"><Layers size={14} /> Chạy nhóm ({selected.length})</button>
+    {error && <p role="alert">{error.message}</p>}
+  </section>;
   return <section className="flex flex-col gap-3 min-w-0 w-full" aria-label="Goal Agent">
+    {controlsMode !== 'results' && <>
     <fieldset disabled={Boolean(busy) || submitting} className="flex gap-3 text-xs" aria-label="Agent version">
       <label className="flex gap-1 items-center"><input type="radio" name="agent-version" checked={version === 1} onChange={() => setVersion(1)} />Agent V1</label>
       <label className="flex gap-1 items-center"><input type="radio" name="agent-version" checked={version === 2} onChange={() => setVersion(2)} />Agent V2</label>
@@ -116,6 +127,7 @@ export function AgentGoalPanel({ text, onText, devices, serial, onSerial, onRefr
       <button type="button" onClick={() => task && void issue(() => runtime.command({ type: 'CANCEL', executionId: task.executionId, deviceId: task.deviceId }))}
         disabled={!task || Boolean(task.finishedAt) || task.cancelRequested || submitting} className="flex gap-2 items-center justify-center border border-slate-200 rounded-md px-3 py-2 text-xs disabled:opacity-50"><Square size={14} /> Hủy</button>
     </div>
+    </>}
     {latest?.v2?.mutations && <section className="text-xs min-w-0" aria-label="Mutation journal">
       <p className="font-semibold">{latest.v2.mutations.restored ? 'Restoration verified' : 'Manual restoration required'}</p>
       <ul className="space-y-1">{latest.v2.mutations.records.map(record => <li key={record.id} className="break-words">

@@ -15,6 +15,7 @@ import { ownerCandidateNonDestructive } from './owner-test-policy';
 import { searchSteps, freshSearchTarget, type SearchScope, type SearchStep } from './generic-search';
 import { rebindTarget } from './target-identity';
 import { temporalUiSteps, bindTemporalUiCandidate, type TemporalUiScope, type TemporalUiPhase } from './temporal-ui';
+import { browserResultTarget, bindBrowserResultCandidate, type BrowserResultScope } from './browser-result';
 
 export interface GroundedCandidateV2 {
   id: string; deviceId: string; executionId: string; nodeId: string; snapshotId: string; sessionId: string; fingerprint: string;
@@ -24,6 +25,7 @@ export interface GroundedCandidateV2 {
   verification: 'STATE_CHANGED' | 'TEXT_EQUALS' | 'ITEM_SELECTED'; description: string;
   keypad?: { key: string; before: string; after: string };
   capture?: boolean;
+  browserResult?: { scopeId: string };
   temporal?: { scopeId: string; phase: TemporalUiPhase };
   record?: { phase: RecordState['phase']; field?: string; identity?: string };
 }
@@ -31,23 +33,28 @@ export interface CandidatePage { candidates: GroundedCandidateV2[]; coverage: { 
 const issued = new WeakMap<GroundedCandidateV2, string>();
 export const isGroundedCandidate = (candidate: GroundedCandidateV2) => issued.get(candidate) === JSON.stringify(candidate);
 const cleanLabel = (text: string) => foldIntent(text).replace(/^(?:muc|trang|tab|page|section)\s+/, '').trim();
-export function generateGroundedCandidates(node: GoalNodeV2, snapshot: Observation, executionId: string, sessionId: string, expressionObserved: boolean, page = 0, enteredKeys = '', mediaReady = false, recordState?: RecordState, ownerMode = false, searchScope?: SearchScope, temporalScope?: TemporalUiScope): CandidatePage {
+export function generateGroundedCandidates(node: GoalNodeV2, snapshot: Observation, executionId: string, sessionId: string, expressionObserved: boolean, page = 0, enteredKeys = '', mediaReady = false, recordState?: RecordState, ownerMode = false, searchScope?: SearchScope, temporalScope?: TemporalUiScope, browserScope?: BrowserResultScope): CandidatePage {
   const affordances = observedAffordances(snapshot, executionId, sessionId), rows: GroundedCandidateV2[] = [];
   const blocked = snapshot.nodes.some(n => /permissioncontroller|packageinstaller/.test(n.packageName) || /keyguard|bouncer/.test(n.resourceId));
-  const add = (target: ObservedAffordance, action: GroundedCandidateV2['action'], effect: GroundedCandidateV2['effect'], value?: string, desired?: boolean, keypad?: GroundedCandidateV2['keypad'], capture?: boolean, record?: GroundedCandidateV2['record'], search?: GroundedCandidateV2['search'], temporal?: GroundedCandidateV2['temporal']) => {
+  const add = (target: ObservedAffordance, action: GroundedCandidateV2['action'], effect: GroundedCandidateV2['effect'], value?: string, desired?: boolean, keypad?: GroundedCandidateV2['keypad'], capture?: boolean, record?: GroundedCandidateV2['record'], search?: GroundedCandidateV2['search'], temporal?: GroundedCandidateV2['temporal'], browserResult?: GroundedCandidateV2['browserResult']) => {
     if (!target.enabled || target.destructive || target.sensitive || blocked) return;
     const data = { deviceId: snapshot.deviceSerial, executionId, nodeId: node.id, snapshotId: snapshot.snapshotId, sessionId, fingerprint: geometryFingerprint(snapshot),
-      target, action, effect, value, desired, keypad, capture, record, search, ...(temporal ? { temporal } : {}), parameterSource: 'USER_REQUEST' as const,
+      target, action, effect, value, desired, keypad, capture, record, search, ...(temporal ? { temporal } : {}), ...(browserResult ? { browserResult } : {}), parameterSource: 'USER_REQUEST' as const,
       verification: action === 'SET_VALUE' ? 'TEXT_EQUALS' as const : 'STATE_CHANGED' as const,
       description: `${action}: ${target.label || target.className}`.slice(0, 160) };
     const candidate = { ...data, id: 'v2_' + createHash('sha256').update(JSON.stringify(data)).digest('hex').slice(0, 16) };
     if (temporalScope && temporal) bindTemporalUiCandidate(candidate, temporalScope);
+    if (browserScope && browserResult) bindBrowserResultCandidate(candidate, browserScope);
     if (ownerMode && !ownerCandidateNonDestructive(candidate)) return;
     issued.set(candidate, JSON.stringify(candidate)); rows.push(candidate);
   };
   const dialogs = affordances.filter(row => /Dialog/.test(row.className));
   const dialog = dialogs.length === 1 ? dialogs[0] : !dialogs.length ? affordances.find(row => row.resourceId === 'android:id/alertTitle') : undefined;
   const unsaved = snapshot.nodes.some(row => /EditText|AutoCompleteTextView/.test(row.className) && row.focused && row.text.trim());
+  if (!dialog && node.capability === 'OPEN_RESULT' && browserScope) {
+    const target = browserResultTarget(browserScope, snapshot);
+    if (target) add(target, 'CLICK', 'READ', undefined, undefined, undefined, undefined, undefined, undefined, undefined, { scopeId: browserScope.id });
+  }
   if (!dialog && node.outcome.temporal && temporalScope) for (const step of temporalUiSteps(temporalScope, snapshot)) add(step.target, step.action, 'LOCAL_WRITE', step.value, undefined, undefined, undefined, undefined, undefined, { scopeId: step.scopeId, phase: step.phase });
   if (!dialog && node.capability === 'SEARCH' && searchScope) for (const step of searchSteps(searchScope, snapshot)) add(step.target, step.action, 'READ', step.value, undefined, undefined, undefined, undefined, { scopeId: searchScope.id, query: searchScope.query, phase: step.phase });
   if (dialog && !unsaved && !affordances.some(row => row.sensitive || row.destructive)) add(dialog, 'BACK', 'READ');

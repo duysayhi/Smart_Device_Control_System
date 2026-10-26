@@ -46,11 +46,9 @@ import { resolveIntent, isIntentEvidence, type IntentEvidence } from './intent-e
 import { registerReviewedOutcomes } from './outcome-spec';
 import { fullControlHardBlock } from './full-control-policy';
 import { chooseCompatible, compatibleReasoner } from './compatible-choice';
-import { issueCloudCommand } from './cloud-command';
+import { bindCommandSource } from './cloud-command';
 import { assertSafeSource } from '../safety-envelope';
-import { enterSearchBoundary, politeWords } from './natural-phrasing';
-import { commandMask, foldIntent } from './outcome-spec';
-import { proposeReviewedPhrasing } from './reviewed-phrasing';
+import { needsPhrasingReview, proposeReviewedPhrasing } from './reviewed-phrasing';
 import { decidePermission } from './permission-decision';
 import { LocalEffectJournal, journalAutoInterpretation } from './local-effect-journal';
 import { GroundedInteractionFailure, consumeNotSentReceipt } from '../grounded-interactions';
@@ -62,6 +60,10 @@ import { resolveTemporalHandler } from './temporal-executor';
 import { clarifyTemporal, clearTemporalClarification } from './temporal-clarification';
 import type { TemporalUiInventory, TemporalUiProof } from './temporal-ui';
 import { runTemporalUi } from './temporal-ui-runner';
+import type { PreparedV2 } from './prepared-v2';
+import { beginBrowserResult } from './browser-result';
+import { verifyBrowserResultOutcome } from './verification-registry';
+import type { VerifiedEvidence } from './evidence-predicates';
 
 export interface V2Execution {
   temporalUiInventoryV2?(packageName: string, request: TemporalRequest, signal?: AbortSignal): Promise<TemporalUiInventory>;
@@ -71,7 +73,7 @@ export interface V2Execution {
   captureKeyV2?(grant: EffectGrant, permit: CameraFallbackPermit, signal?: AbortSignal): Promise<Observation>;
   launchDiscoveredV2?(app: DiscoveredApplication, signal?: AbortSignal): Promise<void>;
   settleV2?(success: boolean): Promise<V2Progress['mutations']>;
-  intentV2?(approval: IntentApproval, binding: IntentBinding, span: { start: number; end: number }, executionId: string, packageName: string, signal?: AbortSignal, owner?: OwnerTestExecution): Promise<IntentEvidence>;
+  intentV2?(approval: IntentApproval, binding: IntentBinding, span: { start: number; end: number }, executionId: string, packageName: string | undefined, signal?: AbortSignal, owner?: OwnerTestExecution): Promise<IntentEvidence>;
   backend: string; sessionId(): string | undefined; observe(signal?: AbortSignal): Promise<Observation>;
   execute(action: Action, signal?: AbortSignal): Promise<unknown>;
   interactV2(grant: EffectGrant, signal?: AbortSignal): Promise<Observation>; close(): Promise<void>;
@@ -98,7 +100,7 @@ export function androidV2Adapter(serial: string, budget: AgentBudget): V2Adapter
   };
   const catalog = new AppCatalog(serial, measuredAdb, undefined, { onTiming: row => budget.measure('CATALOG', (row.packageName ?? '*') + ':' + row.stage, row.elapsedMs) });
   const media = new MediaStoreReader(serial, measuredAdb);
-  return { catalog, async resolveTemporalApp(request, signal) { signal?.throwIfAborted(); const resolved = await resolveTemporalHandler(serial, request, measuredAdb); return (await catalog.resolve(resolved.packageName, 'LAUNCH', signal)).app; }, async resolveIntentApp(request, signal) { signal?.throwIfAborted(); const resolved = await resolveIntent(serial, request, measuredAdb); return (await catalog.resolve(resolved.packageName, 'LAUNCH', signal)).app; }, planningApps: signal => catalog.planningInventory(signal), keyboardVisibility: signal => readKeyboardVisibility(serial, measuredAdb, signal), persistedForms: true, media: { read: (id, cancel) => media.readCapture(id, cancel), readCapture: (id, cancel) => media.readCapture(id, cancel) }, async packageVersion(packageName, signal) {
+  return { catalog, async resolveTemporalApp(request, signal) { signal?.throwIfAborted(); const resolved = await resolveTemporalHandler(serial, request, measuredAdb); return (await catalog.resolve(resolved.packageName, 'LAUNCH', signal)).app; }, async resolveIntentApp(request, signal) { signal?.throwIfAborted(); if (request.name === 'READ_STATE') return; const resolved = await resolveIntent(serial, request, measuredAdb); return (await catalog.resolve(resolved.packageName, 'LAUNCH', signal)).app; }, planningApps: signal => catalog.planningInventory(signal), keyboardVisibility: signal => readKeyboardVisibility(serial, measuredAdb, signal), persistedForms: true, media: { read: (id, cancel) => media.readCapture(id, cancel), readCapture: (id, cancel) => media.readCapture(id, cancel) }, async packageVersion(packageName, signal) {
     if (!/^[A-Za-z][\w]*(?:\.[\w]+)+$/.test(packageName)) return;
     signal?.throwIfAborted();
     const { stdout } = await measuredAdb(['-s', serial, 'shell', 'dumpsys', 'package', packageName], 5000);
@@ -129,11 +131,10 @@ export function androidV2Adapter(serial: string, budget: AgentBudget): V2Adapter
 }
 class SafeBlocked extends Error {}
 export async function runAgentV2(request: string, deviceId: string, executionId: string, physicalId: string, budget: AgentBudget,
-  adapter: V2Adapter, publish: (event: AgentProgress) => void, signal?: AbortSignal, reasoner: JsonReasoner = createStructuredReasoner(), ownerScope?: OwnerTestExecution): Promise<void> {
-  const provider = reasoner, commandRef = issueCloudCommand(request);
-  reasoner = { generate: (schema, system, input, b, cancel) => provider.generate(schema, system,
-    input && typeof input === 'object' ? { ...input, commandRef } : input, b, cancel) };
-  let graph = compileOutcomes(request, deviceId, executionId);
+  adapter: V2Adapter, publish: (event: AgentProgress) => void, signal?: AbortSignal, reasoner: JsonReasoner = createStructuredReasoner(), ownerScope?: OwnerTestExecution, prepared?: PreparedV2): Promise<void> {
+  reasoner = bindCommandSource(reasoner, request);
+  if (prepared && (prepared.graph.original.request !== request || prepared.graph.deviceId !== deviceId || prepared.graph.coverage !== 'COMPLETE')) throw Error('Prepared V2 plan binding mismatch.');
+  let graph = prepared ? { ...prepared.graph, executionId } : compileOutcomes(request, deviceId, executionId);
   const artifacts = new ArtifactStore(deviceId, physicalId, executionId), navigation = new NavigationGraph(deviceId);
   const planningStarted = performance.now(); let planningFinished = false;
   let execution: V2Execution | undefined, current: GoalNodeV2 | undefined, terminal: AgentProgress['status'] = 'BLOCKED';
@@ -150,6 +151,8 @@ export async function runAgentV2(request: string, deviceId: string, executionId:
   let unlockHelp = false;
   let search: V2Progress['search'];
   let temporal: V2Progress['temporal'];
+  let browserResult: V2Progress['browserResult'];
+  const searchProofs = new Map<string, VerifiedEvidence>();
   const localJournals = new Map<string, LocalEffectJournal>();
   const reflections: NonNullable<V2Progress['reflections']> = [];
   let intent: V2Progress['intent'], intentApproval: IntentApproval | undefined, mutations: V2Progress['mutations'];
@@ -159,7 +162,7 @@ export async function runAgentV2(request: string, deviceId: string, executionId:
     goalId: graph.id, description: request, subgoalId: current?.id, subgoal: current?.outcome.span.text, reason: message.slice(0, 180),
     verifiedSubgoals: graph.nodes.filter(row => row.status === 'VERIFIED').length, totalSubgoals: graph.nodes.length,
     screen: latestSnapshot?.screen, foregroundPackage: latestSnapshot?.foregroundPackage, currentScreen: latestSnapshot && understandCurrentScreen(latestSnapshot, executionId), ...budget.summary(),
-    v2: { temporal, version: 2, graph: structuredClone(graph), discovery: discoveryPlan(graph, world), uiUnderstanding: world && { snapshotId: world.snapshotId, state: world.state, widgets: world.widgets.length, groups: world.groups.length, unknown: world.widgets.filter(w => w.roles.includes('unknown')).length }, sessionId: ownedSessionId, analysis, search, ownerAuthorizationId: ownerScope?.id, currentNode: current?.id, capability: current?.capability, coverage, assistance, artifactIds: artifacts.ids(),
+    v2: { browserResult, temporal, version: 2, graph: structuredClone(graph), discovery: discoveryPlan(graph, world), uiUnderstanding: world && { snapshotId: world.snapshotId, state: world.state, widgets: world.widgets.length, groups: world.groups.length, unknown: world.widgets.filter(w => w.roles.includes('unknown')).length }, sessionId: ownedSessionId, analysis, search, ownerAuthorizationId: ownerScope?.id, currentNode: current?.id, capability: current?.capability, coverage, assistance, artifactIds: artifacts.ids(),
       localEffects: [...localJournals.values()].flatMap(j => j.records), reflections, mutations, intent, interaction, artifactResolution, completion: allOutcomesVerified(graph) ? 'ALL_VERIFIED' : graph.nodes.some(row => row.status === 'VERIFIED') ? 'PARTIAL' : 'NONE', artifacts: artifacts.summaries(), availableAffordances: latestSnapshot ? [...new Set(observedAffordances(latestSnapshot, executionId, execution?.sessionId() ?? '').flatMap(row => row.roles))] : [], navigationTransitions: navigation.hints().length } });
   const help = async (category: NonNullable<V2Progress['assistance']>['category'], choices: { id: string; label: string }[], message: string, plan?: import('./outcome-spec').OutcomeSpecV2) => {
     if (category === 'GOAL_INTERPRETATION' && ownerScope && choices.length === 1 && decidePermission({ source: request, stage: 'INTERPRETATION', owner: ownerScope, deviceId, physicalId, executionId, plan }).decision === 'ALLOW') {
@@ -215,6 +218,10 @@ export async function runAgentV2(request: string, deviceId: string, executionId:
     if (ownerScope?.fullControl && fullControlHardBlock(request)) throw new SafeBlocked('HARD_BLOCKED: excluded destructive/security operation; no device effect.');
     if (ownerScope && destructiveTestIntent(request)) throw new SafeBlocked('OWNER_TEST_DESTRUCTIVE_INTENT: no action authorized.');
     try { assertSafeSource(request); } catch (error) { throw new SafeBlocked(error instanceof Error ? error.message : 'HARD_BLOCKED: unsafe source.'); }
+    if (prepared?.review) {
+      await help('GOAL_INTERPRETATION', [{ id: 'accept', label: prepared.summary }], 'Review the prepared source-bound interpretation before any effect.', graph.original);
+      analysis.source = 'MODEL_REVIEWED';
+    }
     const proposedIntents = adapter.resolveIntentApp ? proposeIntentOutcomes(request) : undefined;
     if (proposedIntents) {
       const summary = proposedIntents.outcomes.map(o => o.intent!.request.name + ': ' + Object.values(o.intent!.request.args).join(' | ')).join('; ');
@@ -228,11 +235,10 @@ export async function runAgentV2(request: string, deviceId: string, executionId:
       budget.runtimeIdentity = { executionId, deviceId, physicalId };
       if (destructiveTestIntent(request)) throw new SafeBlocked('OWNER_TEST_DESTRUCTIVE_INTENT: no action authorized.');
     }
-    const first = graph.original.outcomes[0], second = graph.original.outcomes[1];
-    const gap = second ? commandMask(request).slice(first.span.end, second.span.start).trim() : undefined;
-    const natural = Boolean(enterSearchBoundary(commandMask(request))) && gap !== undefined && ['', 'de', 'to'].includes(gap) ||
-      graph.original.outcomes.some(o => new RegExp('^(?:' + politeWords + ')\\s+').test(foldIntent(o.span.text)));
-    if (!proposedIntents && natural && graph.coverage === 'COMPLETE' && !graph.nodes.some(node => node.outcome.temporal)) {
+    if (graph.nodes.some(node => node.outcome.intent?.request.name === 'READ_STATE')) budget.runtimeIdentity = { executionId, deviceId, physicalId };
+    const natural = needsPhrasingReview(request, graph.original);
+    const hasReadState = graph.nodes.some(node => node.outcome.intent?.request.name === 'READ_STATE');
+    if (!prepared && !proposedIntents && !hasReadState && natural && graph.coverage === 'COMPLETE' && !graph.nodes.some(node => node.outcome.temporal)) {
       let p;
       try { p = adapter.planningApps
         ? await proposeReviewedPhrasing(request, await adapter.planningApps(signal), reasoner, budget, signal)
@@ -241,7 +247,7 @@ export async function runAgentV2(request: string, deviceId: string, executionId:
       await help('GOAL_INTERPRETATION', [{ id: 'accept', label: p.summary }], 'Review the complete source-bound application launch and exact query before any effect.');
       graph = bindReviewedPrimitives(p, deviceId, executionId);
     }
-    if (graph.coverage !== 'COMPLETE' && graph.original.outcomes.some(row => row.kind === 'UNKNOWN') && graph.original.outcomes.every(row => !row.negated)) {
+    if (!prepared && !hasReadState && graph.coverage !== 'COMPLETE' && graph.original.outcomes.some(row => row.kind === 'UNKNOWN') && graph.original.outcomes.every(row => !row.negated)) {
       emit('PLANNING', 'Request has unsupported phrasing; select source-bound semantic interpretations for review.');
       let proposal;
       const decompose = async () => {
@@ -281,6 +287,7 @@ export async function runAgentV2(request: string, deviceId: string, executionId:
     const apps = new Map<string, DiscoveredApplication>();
     for (const node of graph.nodes) {
       current = node;
+      if (node.outcome.intent?.request.name === 'READ_STATE') { node.packageName = undefined; continue; }
       emit('PLANNING', 'Compile requested outcomes and discover a verified per-device application.');
       const key = node.outcome.intent ? JSON.stringify(node.outcome.intent.request) : node.app ?? node.capability;
       if (!apps.has(key)) {
@@ -314,7 +321,7 @@ export async function runAgentV2(request: string, deviceId: string, executionId:
         intentApproval ??= approveIntentSource(request, deviceId, executionId, physicalId);
         budget.consume('steps'); await ensureReady(); const started = performance.now();
         let proof: IntentEvidence;
-        try { proof = await execution.intentV2(intentApproval, binding, current.outcome.span, executionId, current.packageName!, signal, ownerScope); }
+        try { proof = await execution.intentV2(intentApproval, binding, current.outcome.span, executionId, current.packageName, signal, ownerScope); }
         catch (error) { throw new SafeBlocked(error instanceof Error ? error.message : 'Intent outcome uncertain; no replay.'); }
         finally { budget.timings.executionMs += performance.now() - started; }
         if (!isIntentEvidence(proof) || proof.deviceId !== deviceId || proof.executionId !== executionId || proof.sessionId !== execution.sessionId() || proof.name !== binding.request.name || Date.now() - proof.observedAt < 0 || Date.now() - proof.observedAt > 5000) throw new SafeBlocked('Foreign, stale or unissued intent evidence.');
@@ -403,6 +410,7 @@ export async function runAgentV2(request: string, deviceId: string, executionId:
         }
         if (current.capability === 'SEARCH') {
           const proof = await runGenericSearch({ node: current, deviceId, executionId, execution, budget, signal, ownerScope, fresh,
+            surface: graph.nodes.some(n => n.capability === 'OPEN_RESULT' && n.dependencies.includes(current!.id)) ? 'BROWSER_ORGANIC' : undefined,
             keyboard: adapter.keyboardVisibility ? () => adapter.keyboardVisibility!(signal) : undefined,
               userAction: async action => { await help('USER_ACTION', [{ id: 'continue', label: 'I handled the screen manually; observe again' }], 'NEEDS_USER_ACTION: ' + action.reason + '. No consent or settings action is authorized.'); },
             choose: async candidates => {
@@ -415,8 +423,33 @@ export async function runAgentV2(request: string, deviceId: string, executionId:
               return decision.choice === 'ABSTAIN' ? help('TARGET_SELECTION', candidates.map(c => ({ id: c.id, label: c.description })), 'Search targets require disambiguation.') : decision.choice;
             }, progress: (state, candidate) => { search = state; if (candidate) interaction = { candidateId: candidate.id, snapshotId: candidate.snapshotId, action: candidate.action, targetRef: candidate.target.elementId }; emit(candidate ? 'EXECUTING' : 'VERIFYING', `SEARCH: ${state.phase}${state.status ? ' ' + state.status : ''}`); } });
           current.status = 'VERIFIED'; current.evidenceIds.push(proof.id);
+          searchProofs.set(current.id, proof);
           current.outputs = [artifacts.put(proof, graph.nodes.filter(row => row.dependencies.includes(current!.id)).map(row => row.id)).id];
           emit('VERIFYING', 'Submitted search and independent query/result state verified; no result opened.'); nodeDone = true; continue;
+        }
+        if (current.capability === 'OPEN_RESULT') {
+          const parent = graph.nodes.find(n => current!.dependencies.includes(n.id) && n.capability === 'SEARCH' && n.status === 'VERIFIED' && n.packageName === current!.packageName);
+          const searchProof = parent && searchProofs.get(parent.id);
+          if (!searchProof) throw new SafeBlocked('BROWSER_RESULT_SEARCH_EVIDENCE_MISSING');
+          let scope;
+          try { scope = beginBrowserResult(current, snapshot, searchProof, execution.sessionId()!); }
+          catch (error) { throw new SafeBlocked(error instanceof Error ? error.message : 'BROWSER_RESULT_SCOPE_UNPROVEN'); }
+          const manifest = generateGroundedCandidates(current, snapshot, executionId, execution.sessionId()!, false, 0, '', false, undefined, Boolean(ownerScope), undefined, undefined, scope);
+          if (manifest.candidates.length !== 1) throw new SafeBlocked('BROWSER_RESULT_ORGANIC_TARGET_UNPROVEN');
+          const candidate = manifest.candidates[0];
+          budget.profiling.singletonCandidatesSkipped++; budget.consume('steps');
+          interaction = { candidateId: candidate.id, snapshotId: candidate.snapshotId, action: candidate.action, targetRef: candidate.target.elementId };
+          emit('EXECUTING', 'Open one backend-grounded first organic article; no ordinal fallback or replay.');
+          let after: Observation; const started = performance.now();
+          try { after = await execution.interactV2(issueEffectGrant(candidate, current, ownerScope), signal); }
+          catch (error) { signal?.throwIfAborted(); throw new SafeBlocked('BROWSER_RESULT_UNVERIFIED_NO_REPLAY: ' + (error instanceof Error ? error.message : 'Unknown click outcome')); }
+          finally { budget.timings.executionMs += performance.now() - started; }
+          const proof = verifyBrowserResultOutcome(scope, await fresh(after), { deviceId, executionId, nodeId: current.id, packageName: current.packageName! });
+          if (!proof?.browserResult) throw new SafeBlocked('BROWSER_RESULT_DESTINATION_UNVERIFIED_NO_REPLAY');
+          current.status = 'VERIFIED'; current.evidenceIds.push(proof.id);
+          browserResult = { ...proof.browserResult, evidenceId: proof.id };
+          emit('VERIFYING', 'Prior exact search, organic identity and loaded destination URL/title independently verified.');
+          nodeDone = true; continue;
         }
         if (current.capability === 'FIND_ARTIFACT') {
           const media = current.inputs.flatMap(producer => graph.nodes.find(row => row.id === producer)?.outputs ?? [])
@@ -604,7 +637,7 @@ export async function runAgentV2(request: string, deviceId: string, executionId:
     try { await execution?.close(); } catch { terminal = 'FAILED'; reason = 'Session cleanup is uncertain; inspect retained device ownership.'; }
     emit(terminal, reason);
     publish({ type: 'complete', status: terminal, goalId: graph.id, description: request, reason: reason.slice(0, 180), verifiedSubgoals: graph.nodes.filter(n => n.status === 'VERIFIED').length, totalSubgoals: graph.nodes.length,
-      ...budget.summary(), v2: { temporal, localEffects: [...localJournals.values()].flatMap(j => j.records), reflections, version: 2, graph, discovery: discoveryPlan(graph, world), uiUnderstanding: world && { snapshotId: world.snapshotId, state: world.state, widgets: world.widgets.length, groups: world.groups.length, unknown: world.widgets.filter(w => w.roles.includes('unknown')).length }, sessionId: ownedSessionId, analysis, search, mutations, intent, artifactResolution, completion: allOutcomesVerified(graph) ? 'ALL_VERIFIED' : graph.nodes.some(row => row.status === 'VERIFIED') ? 'PARTIAL' : 'NONE', artifacts: artifacts.summaries(), artifactIds: artifacts.ids(), result: terminal === 'COMPLETED' ? assisted ? 'ASSISTED_COMPLETED' : 'AUTO_COMPLETED' : terminal === 'CANCELLED' ? 'CANCELLED' : terminal === 'BLOCKED' ? 'SAFE_BLOCKED' : 'FAILED' } });
+      ...budget.summary(), v2: { browserResult, temporal, localEffects: [...localJournals.values()].flatMap(j => j.records), reflections, version: 2, graph, discovery: discoveryPlan(graph, world), uiUnderstanding: world && { snapshotId: world.snapshotId, state: world.state, widgets: world.widgets.length, groups: world.groups.length, unknown: world.widgets.filter(w => w.roles.includes('unknown')).length }, sessionId: ownedSessionId, analysis, search, mutations, intent, artifactResolution, completion: allOutcomesVerified(graph) ? 'ALL_VERIFIED' : graph.nodes.some(row => row.status === 'VERIFIED') ? 'PARTIAL' : 'NONE', artifacts: artifacts.summaries(), artifactIds: artifacts.ids(), result: terminal === 'COMPLETED' ? assisted ? 'ASSISTED_COMPLETED' : 'AUTO_COMPLETED' : terminal === 'CANCELLED' ? 'CANCELLED' : terminal === 'BLOCKED' ? 'SAFE_BLOCKED' : 'FAILED' } });
     clearTemporalClarification(executionId);
     artifacts.dispose();
   }

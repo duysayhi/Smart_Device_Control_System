@@ -42,26 +42,28 @@ export function createMediaPlaybackVerifier(run: AdbRunner, serial: string) {
   let previous: ReturnType<typeof readPlayingSession>;
   let previousSnapshot: string | undefined;
   let previousClockBased = false;
-  let verifiedFrom: number | undefined;
+  let previousBinding: string | undefined;
   return async (selection: DiscoveredSelection, before: Observation, after: Observation,
     remainingMs: number, signal?: AbortSignal): Promise<boolean> => {
+    delete after.playback;
     checkCancellation(signal);
+    const binding = JSON.stringify([before.snapshotId, before.foregroundPackage, selection.identity, selection.ordinal, selection.title]);
+    if (binding !== previousBinding) previous = undefined;
+    previousBinding = binding;
     if (selection.itemType !== 'video' || !selection.title || after.observationStatus !== 'OBSERVED' ||
       after.foregroundPackage !== before.foregroundPackage || after.screen !== 'VIDEO_PLAYER' ||
       before.screen === 'VIDEO_PLAYER' || after.deviceSerial !== serial || after.snapshotId === before.snapshotId) {
       previous = undefined;
-      verifiedFrom = undefined;
       return false;
     }
     const commandStarted = performance.now();
     let output: string;
     try { output = (await run(['-s', serial, 'shell', 'dumpsys', 'media_session'], Math.max(1, Math.min(3000, remainingMs)))).stdout; }
-    catch { checkCancellation(signal); previous = undefined; verifiedFrom = undefined; return false; }
+    catch { checkCancellation(signal); previous = undefined; return false; }
     checkCancellation(signal);
     let current = readPlayingSession(output, after.foregroundPackage);
     if (!current || canonicalUiText(current.title) !== canonicalUiText(selection.title)) {
       previous = undefined;
-      verifiedFrom = undefined;
       return false;
     }
     let clockBased = false;
@@ -75,19 +77,18 @@ export function createMediaPlaybackVerifier(run: AdbRunner, serial: string) {
       }
     } catch { checkCancellation(signal); }
     checkCancellation(signal);
-    if (!current) { previous = undefined; verifiedFrom = undefined; return false; }
-    if (previousClockBased !== clockBased) { previous = undefined; verifiedFrom = undefined; }
+    if (!current) { previous = undefined; return false; }
+    if (previousClockBased !== clockBased) previous = undefined;
     const advancing = previous && previousSnapshot !== after.snapshotId && previous.updated <= current.updated &&
       canonicalUiText(previous.title) === canonicalUiText(current.title) && current.positionMs > previous.positionMs;
     const previousPositionMs = previous?.positionMs ?? current.positionMs;
-    if (previous && current.positionMs < previous.positionMs) verifiedFrom = undefined;
-    if (advancing && verifiedFrom === undefined) verifiedFrom = previousPositionMs;
     previous = current;
     previousClockBased = clockBased;
     previousSnapshot = after.snapshotId;
-    if (verifiedFrom === undefined || current.positionMs <= verifiedFrom) return false;
+    // An earlier advance cannot attest to a later frozen or repeated sample.
+    if (!advancing) return false;
     after.playback = { source: 'ADB_MEDIA_SESSION', packageName: after.foregroundPackage,
-      title: current.title, positionMs: current.positionMs, previousPositionMs: verifiedFrom,
+      title: current.title, positionMs: current.positionMs, previousPositionMs,
       ...(clockBased ? { positionSource: 'ANDROID_PLAYBACK_CLOCK' as const } : {}) };
     return true;
   };

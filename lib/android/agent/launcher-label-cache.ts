@@ -9,8 +9,9 @@ const rowSchema = z.object({ physicalId: z.string().min(1).max(200), packageName
   versionCode: z.string().regex(/^\d{1,30}$/), updatedAt: z.string().max(100).optional(), component: z.string().max(300),
   labels: z.array(z.string().min(1).max(150).refine(s => !/[\u0000-\u001f]/.test(s))).max(200), retryAfter: z.number().finite().optional(), at: z.number().finite() }).strict();
 type Row = z.infer<typeof rowSchema>;
-const fileSchema = z.object({ schema: z.literal(1), rows: z.array(rowSchema).max(500) }).strict();
-export const launcherCacheDirectory = () => join(tmpdir(), 'phone-commander-label-cache-v1');
+const cacheVersion = 2;
+const fileSchema = z.object({ schema: z.literal(cacheVersion), rows: z.array(rowSchema).max(500) }).strict();
+export const launcherCacheDirectory = () => join(tmpdir(), `phone-commander-label-cache-v${cacheVersion}`);
 
 // Names only. No caller may use this cache as proof of installation, identity or execution authority.
 export class LauncherLabelCache {
@@ -41,7 +42,7 @@ export class LauncherLabelCache {
   }
   async save() {
     if (!this.dirty) return;
-    const content = JSON.stringify({ schema: 1, rows: this.rows });
+    const content = JSON.stringify({ schema: cacheVersion, rows: this.rows });
     if (Buffer.byteLength(content) > 1024 * 1024) return;
     await mkdir(this.directory, { recursive: true });
     const temp = join(this.directory, 'labels.' + randomUUID() + '.tmp');

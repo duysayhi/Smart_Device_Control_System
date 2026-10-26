@@ -49,12 +49,13 @@ export function compileOutcomes(request: string | OutcomeSpecV2, deviceId: strin
     if (outcome.kind === 'INTENT' && (!outcome.intent || !intentCapabilities[outcome.intent.request.name].implemented)) reason = 'NOT_IMPLEMENTED: intent has no independently verified non-persisting executor.';
     if (['ALARM', 'TIMER'].includes(outcome.kind) && !outcome.temporal && !outcome.ambiguity.length) reason = 'UNSUPPORTED_OUTCOME: typed time contract missing.';
     if (outcome.kind === 'CALCULATE') { try { arithmeticOracle(outcome.value); } catch { reason = 'UNSUPPORTED_OUTCOME: arithmetic expression cannot be compiled.'; } }
+    if (outcome.kind === 'OPEN_RESULT' && (!outcome.browserResult || outcome.browserResult.ordinal !== 1 || index === 0 || original.outcomes[index - 1].kind !== 'SEARCH' || original.outcomes[index - 1].value !== outcome.browserResult.query)) reason = 'NEEDS_CLARIFICATION: BROWSER_RESULT_UNSUPPORTED: only first organic article after an exact search is supported.';
     if (outcome.kind === 'SET_STATE' && !requestedToggle(outcome)) reason = 'UNSUPPORTED_OUTCOME: only explicit labeled boolean state has a registered verifier.';
     if (outcome.kind === 'CAPTURE_MEDIA' && !requestedPhoto(outcome)) reason = 'UNSUPPORTED_OUTCOME: only an explicitly requested single photo has a registered media verifier.';
     if (['CREATE_RECORD', 'SET_STRUCTURED_STATE'].includes(outcome.kind) && !requestedRecord(outcome)) reason = 'UNSUPPORTED_OUTCOME: no exact supported record/time schema and readback contract.';
     const mediaProducer = outcome.kind === 'FIND_ARTIFACT' ? original.outcomes.slice(0, index).findLast(row => row.kind === 'CAPTURE_MEDIA') : undefined;
     if (outcome.kind === 'FIND_ARTIFACT' && (!mediaProducer || !/^(?:anh|hinh|photo|image)\s+(?:vua chup|just captured)$/.test(foldIntent(outcome.value)))) reason = 'UNSUPPORTED_OUTCOME: exact media view requires a typed capture producer; generic Gallery UI search is not implemented.';
-    return { id: outcome.id, outcome, dependencies: [...new Set([...(index ? [original.outcomes[index - 1].id] : []), ...(mediaProducer ? [mediaProducer.id] : [])])], app,
+    return { id: outcome.id, outcome, dependencies: [...new Set([...(index ? [original.outcomes[index - 1].id] : []), ...(mediaProducer ? [mediaProducer.id] : [])])], app: outcome.intent?.request.name === 'READ_STATE' ? undefined : app,
       capability: outcome.kind, preconditions: ['fresh device observation', 'grounded scope', 'registered verification'],
       predicates: [...capability.predicates], inputs: mediaProducer ? [mediaProducer.id] : [],
       outputs: ['CREATE_RECORD', 'CAPTURE_MEDIA'].includes(outcome.kind) ? [outcome.id + ':artifact'] : [],

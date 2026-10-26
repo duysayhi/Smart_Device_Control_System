@@ -17,12 +17,13 @@ export class SearchNeedsUserAction extends SearchBlocked {
 }
 
 export async function runGenericSearch(input: { node: GoalNodeV2; deviceId: string; executionId: string; execution: V2Execution; budget: AgentBudget; signal?: AbortSignal; ownerScope?: OwnerTestExecution;
+  surface?: 'BROWSER_ORGANIC';
   fresh(carry?: Observation): Promise<Observation>; choose(candidates: GroundedCandidateV2[]): Promise<string>;
   keyboard?(): Promise<KeyboardVisibility>;
   userAction?(action: SearchUserAction): Promise<void>;
   progress(state: NonNullable<V2Progress['search']>, candidate?: GroundedCandidateV2): void }) {
   const { node, execution, budget, signal } = input;
-  const scope = beginSearch(node, input.deviceId, input.executionId, execution.sessionId()!);
+  const scope = beginSearch(node, input.deviceId, input.executionId, execution.sessionId()!, input.surface);
   const attempts = new Set<string>(); let submitted = false, renewals = 0, carry: Observation | undefined;
   try {
     for (let i = 0; i < 10; i++) {

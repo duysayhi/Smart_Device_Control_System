@@ -10,6 +10,7 @@ import { sharedReasoningScheduler } from './reasoning-scheduler';
 import type { WorkerAddress } from './runtime-storage';
 import { z } from 'zod';
 import { CatalogWarmup } from './catalog-warmup';
+import { PreparedCommand } from '../unified-agent/contracts';
 
 async function jsonBody(request: IncomingMessage) {
   const chunks: Buffer[] = []; let size = 0;
@@ -89,6 +90,15 @@ export async function startWorker(options: { directory?: string; adapter?: Runti
         }
         response.end(JSON.stringify({ tasks, devices, reasoning: sharedReasoningScheduler.summary(), ownerTestModes: registry.ownerTestModes(), ownerPolicyAudit: registry.ownerPolicyAudit() })); return;
       }
+      if (request.url === '/planning' && request.method === 'POST' && !stopping) {
+        const command = PreparedCommand.parse(await jsonBody(request));
+        admitting++;
+        try {
+          await warmup?.pause();
+          response.end(JSON.stringify(command.type === 'PREPARE' ? await registry.prepare(command.source, command.deviceId, command.engine) : { tasks: await registry.startPrepared(command.reference) }));
+        } finally { admitting--; warmup?.schedule(); }
+        return;
+      }
       if (request.url !== '/tasks' || request.method !== 'POST' || stopping) { response.writeHead(404).end('{}'); return; }
       const command = RuntimeCommand.parse(await jsonBody(request));
       if (command.type === 'SET_OWNER_TEST_MODE') {
@@ -118,7 +128,7 @@ export async function startWorker(options: { directory?: string; adapter?: Runti
   });
   await new Promise<void>((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', () => resolve()); });
   const address = server.address(); if (!address || typeof address === 'string') throw new Error('No worker address.');
-  const metadata: WorkerAddress = { port: address.port, token, pid: process.pid, protocol: 1, features: ['agent-v2', 'owner-test-mode', 'full-control-test-mode', 'source-policy-v2'],
+  const metadata: WorkerAddress = { port: address.port, token, pid: process.pid, protocol: 1, features: ['unified-prepared-plan', 'agent-v2', 'owner-test-mode', 'full-control-test-mode', 'source-policy-v2'],
     runtimeSha256: androidRuntimeDigest(), observerIdleTimeoutMs: Number(process.env.AGENT_V2_OBSERVER_IDLE_TIMEOUT_MS ?? process.env.ANDROID_OBSERVER_IDLE_TIMEOUT_MS ?? 1000) };
   await writeFile(join(root, 'address.json'), JSON.stringify(metadata), { mode: 0o600 });
   const shutdown = async () => {

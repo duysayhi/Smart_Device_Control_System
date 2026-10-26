@@ -8,7 +8,7 @@ export const GoalGraphV2Schema = z.object({
   coverage: z.enum(['COMPLETE', 'UNSUPPORTED_OUTCOME', 'NEEDS_CLARIFICATION']),
   nodes: z.array(z.object({ id: z.string().min(1), outcome: OutcomeV2Schema, dependencies: z.array(z.string()).max(16),
     app: z.string().optional(), packageName: z.string().optional(), capability: OutcomeKind,
-    preconditions: z.array(z.string()).max(8), predicates: z.array(z.enum(['FOREGROUND_IS', 'ELEMENT_VISIBLE', 'TEXT_EQUALS', 'VALUE_EQUALS', 'ITEM_SELECTED', 'RECORD_READBACK_MATCHES', 'TEMPORAL_READBACK_MATCHES', 'ARTIFACT_EXISTS', 'ARTIFACT_IDENTITY_MATCHES', 'SEARCH_OUTCOME_MATCHES', 'INTENT_OUTCOME_VERIFIED'])).max(8),
+    preconditions: z.array(z.string()).max(8), predicates: z.array(z.enum(['FOREGROUND_IS', 'ELEMENT_VISIBLE', 'TEXT_EQUALS', 'VALUE_EQUALS', 'ITEM_SELECTED', 'RECORD_READBACK_MATCHES', 'TEMPORAL_READBACK_MATCHES', 'ARTIFACT_EXISTS', 'ARTIFACT_IDENTITY_MATCHES', 'SEARCH_OUTCOME_MATCHES', 'BROWSER_RESULT_MATCHES', 'INTENT_OUTCOME_VERIFIED'])).max(8),
     inputs: z.array(z.string()).max(16), outputs: z.array(z.string()).max(16), status: z.enum(['PENDING', 'RUNNING', 'VERIFIED', 'SAFE_BLOCKED']), reason: z.string().optional(), evidenceIds: z.array(z.string()).max(16),
   }).strict()).min(1).max(16),
 }).strict().superRefine((graph, ctx) => {
@@ -40,6 +40,7 @@ export interface V2Assistance {
   expiresAt: number; choices: { id: string; label: string }[]; reason: string; sessionRetained: boolean;
 }
 export interface V2Progress {
+  browserResult?: { query: string; ordinal: 1; surface: 'BROWSER_ORGANIC'; url: string; title: string; searchEvidenceId: string; evidenceId: string };
   temporal?: { kind: 'ALARM' | 'TIMER'; identity: string; evidenceId: string; zone: string; request: import('./temporal-contract').TemporalRequest;
     tier?: 'PROVIDER_READBACK' | 'UI_LIST_READBACK' | 'UI_RUNNING_READBACK'; label?: string;
     beforeRows?: import('./temporal-ui').AlarmUiRow[]; afterRows?: import('./temporal-ui').AlarmUiRow[]; remaining?: number[];

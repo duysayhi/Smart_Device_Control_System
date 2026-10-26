@@ -9,8 +9,10 @@ import { isDescendant } from '../exploration/scroll-regions';
 import { emptyResultText, exactQuerySummary, resultSurface, type EvidenceAssessment } from './read-only-verifiers';
 import { isKeyboardVisibility, type KeyboardVisibility } from './keyboard-visibility';
 import { isGroundedCandidate } from './grounded-candidates-v2';
+import { browserResultDescriptor } from './browser-result-contract';
+import { verifyBrowserSearch } from '../action-verifier';
 
-export interface SearchScope { id: string; deviceId: string; executionId: string; sessionId: string; nodeId: string; packageName: string; query: string; createdAt: number }
+export interface SearchScope { id: string; deviceId: string; executionId: string; sessionId: string; nodeId: string; packageName: string; query: string; createdAt: number; surface?: 'BROWSER_ORGANIC' }
 export interface SearchStep { phase: 'OPEN' | 'MENU' | 'DISMISS' | 'RESET' | 'FOCUS' | 'CLEAR' | 'ENTER' | 'SUBMIT'; target: ObservedAffordance; action: 'CLICK' | 'BACK' | 'SET_VALUE' | 'IME_SEARCH'; value?: string }
 interface SearchRun { scope: SearchScope; signature: string; submittedAt?: number; beforeSubmit?: string; beforeResult?: string; attemptedSubmit: boolean; dismissed?: boolean; menuTried?: boolean;
   typedAt?: number; beforeTypeResult?: string; liveSnapshot?: string; liveSignature?: string; submission?: 'EXPLICIT_RPC' | 'LIVE_TRANSITION';
@@ -21,7 +23,7 @@ const activations = new WeakMap<GroundedCandidateV2, Observation>();
 const fieldIdentity = (row: ObservedAffordance) => JSON.stringify([row.packageName, row.resourceId, row.className, row.bounds]);
 export function isScopedSearchField(scopeId: string, row: ObservedAffordance): boolean {
   const run = runs.get(scopeId);
-  return isSearchField(row) || Boolean(run && active(run.scope) && run.provenField === fieldIdentity(row) && row.enabled && row.roles.includes('editable') && !row.sensitive && !row.destructive);
+  return isSearchField(row) || Boolean(run && active(run.scope) && (run.provenField === fieldIdentity(row) || run.scope.surface === 'BROWSER_ORGANIC' && browserAddress(row)) && row.enabled && row.roles.includes('editable') && !row.sensitive && !row.destructive);
 }
 export function noteSearchActivationAcknowledged(candidate: GroundedCandidateV2, before: Observation) {
   const run = candidate.search && runs.get(candidate.search.scopeId);
@@ -50,7 +52,9 @@ function resultSignature(snapshot: Observation, query?: string): string | undefi
   return content.length ? JSON.stringify(content.map(n => [n.resourceId, n.className, n.text, n.description, n.clickable])) : undefined;
 }
 const label = (row: ObservedAffordance) => foldIntent(row.label).replace(/[,\s]+(?:phim|button)\.?$/, '').trim();
-function collapsedSearch(row: ObservedAffordance): boolean {
+const browserAddress = (row: ObservedAffordance) => browserResultDescriptor.addressFields.test(row.resourceId.split('/').at(-1) ?? '');
+function collapsedSearch(row: ObservedAffordance, scope?: SearchScope): boolean {
+  if (scope?.surface === 'BROWSER_ORGANIC' && browserAddress(row) && row.roles.includes('clickable') && !row.roles.includes('editable')) return true;
   if (row.searchEntry && row.roles.includes('clickable') && !row.roles.includes('editable')) return true;
   return row.roles.includes('clickable') && !row.roles.includes('editable') && /TextView|SearchView/.test(row.className) &&
     /(?:^|[_-])search[_-](?:query|box|bar|text)(?:$|[_-])/.test(row.resourceId.split('/').at(-1) ?? '');
@@ -71,10 +75,11 @@ export function searchQuery(value: string): string {
   const trimmed = value.trim(), pairs: Record<string, string> = { '"': '"', "'": "'", '\u201c': '\u201d' };
   return pairs[trimmed[0]] && trimmed.at(-1) === pairs[trimmed[0]] ? trimmed.slice(1, -1) : trimmed;
 }
-export function beginSearch(node: GoalNodeV2, deviceId: string, executionId: string, sessionId: string): SearchScope {
+export function beginSearch(node: GoalNodeV2, deviceId: string, executionId: string, sessionId: string, surface?: 'BROWSER_ORGANIC'): SearchScope {
   const query = searchQuery(node.outcome.value);
   if (node.capability !== 'SEARCH' || node.outcome.negated || !node.packageName || !query || query.length > 1000 || !sessionId) throw Error('Unsupported search scope.');
-  const scope = Object.freeze({ id: randomUUID(), deviceId, executionId, sessionId, nodeId: node.id, packageName: node.packageName, query, createdAt: Date.now() });
+  if (surface && !browserResultDescriptor.packages.includes(node.packageName)) throw Error('Unsupported browser search descriptor.');
+  const scope = Object.freeze({ id: randomUUID(), deviceId, executionId, sessionId, nodeId: node.id, packageName: node.packageName, query, createdAt: Date.now(), ...(surface ? { surface } : {}) });
   runs.set(scope.id, { scope, signature: JSON.stringify(scope), attemptedSubmit: false }); return scope;
 }
 function active(scope: SearchScope) {
@@ -109,7 +114,7 @@ export function searchSteps(scope: SearchScope, snapshot: Observation): SearchSt
   }
   const open = searchEntries;
   if (open.length) return open.map(target => ({ phase: 'OPEN', action: 'CLICK', target }));
-  const collapsed = rows.filter(collapsedSearch);
+  const collapsed = rows.filter(row => collapsedSearch(row, scope));
   if (collapsed.length) return collapsed.map(target => ({ phase: 'OPEN', action: 'CLICK', target }));
   const unknownInputs = observed.filter(r => r.roles.includes('editable'));
   if (!run.resetTried && unknownInputs.length === 1 && unknownInputs[0].focused && unknownInputs[0].text === '' && !unknownInputs[0].sensitive && !unknownInputs[0].destructive) {
@@ -128,7 +133,7 @@ export function searchCandidateAllowed(candidate: GroundedCandidateV2, node: Goa
       step!.phase === 'ENTER' ? candidate.action === 'SET_VALUE' && candidate.value === run.scope.query && isScopedSearchField(run.scope.id, candidate.target) && candidate.target.focused :
       step!.phase === 'FOCUS' ? candidate.action === 'CLICK' && isScopedSearchField(run.scope.id, candidate.target) && !candidate.target.focused :
       step!.phase === 'SUBMIT' ? candidate.action === 'CLICK' && searchLabel(label(candidate.target)) || candidate.action === 'IME_SEARCH' && isScopedSearchField(run.scope.id, candidate.target) && candidate.target.focused && candidate.target.text === run.scope.query :
-      candidate.action === 'CLICK' && (step!.phase === 'OPEN' ? collapsedSearch(candidate.target) || searchLabel(label(candidate.target)) || candidate.target.navigationIntent === 'SEARCH' && candidate.target.roles.includes('navigation') || /(?:\$Tab|\.Tab)$/.test(candidate.target.className) : /^(menu|open menu|more options|mo menu|tuy chon khac)$/.test(label(candidate.target)))));
+      candidate.action === 'CLICK' && (step!.phase === 'OPEN' ? collapsedSearch(candidate.target, run.scope) || searchLabel(label(candidate.target)) || candidate.target.navigationIntent === 'SEARCH' && candidate.target.roles.includes('navigation') || /(?:\$Tab|\.Tab)$/.test(candidate.target.className) : /^(menu|open menu|more options|mo menu|tuy chon khac)$/.test(label(candidate.target)))));
 }
 export function freshSearchTarget(candidate: GroundedCandidateV2, snapshot: Observation): ObservedAffordance | undefined {
   const run = candidate.search && runs.get(candidate.search.scopeId);
@@ -146,8 +151,8 @@ export function searchTransitionSatisfied(candidate: GroundedCandidateV2, snapsh
   const fields = observedAffordances(snapshot, run.scope.executionId, run.scope.sessionId).filter(r => isScopedSearchField(run.scope.id, r));
   if (candidate.search!.phase === 'OPEN') {
     if (fields.length === 1) return true;
-    const surfaces = observedAffordances(snapshot, run.scope.executionId, run.scope.sessionId).filter(r => collapsedSearch(r) && !r.sensitive && !r.destructive);
-    return fields.length === 0 && !collapsedSearch(candidate.target) && surfaces.length === 1;
+    const surfaces = observedAffordances(snapshot, run.scope.executionId, run.scope.sessionId).filter(r => collapsedSearch(r, run.scope) && !r.sensitive && !r.destructive);
+    return fields.length === 0 && !collapsedSearch(candidate.target, run.scope) && surfaces.length === 1;
   }
   if (candidate.search!.phase === 'MENU') return searchSteps(run.scope, snapshot).some(s => s.phase === 'OPEN');
   if (candidate.search!.phase === 'RESET') return !observedAffordances(snapshot, run.scope.executionId, run.scope.sessionId).some(r => r.roles.includes('editable')) && searchSteps(run.scope, snapshot).some(s => s.phase === 'OPEN');
@@ -206,6 +211,15 @@ export function observeLiveSearch(scope: SearchScope, snapshot: Observation): 'P
 export function searchResult(scope: SearchScope, snapshot: Observation): { query: string; status: 'RESULTS' | 'NO_RESULTS'; count: number; submission?: 'EXPLICIT_RPC' | 'LIVE_TRANSITION' } | undefined {
   const run = active(scope);
   if (!run?.submittedAt || !bound(scope, snapshot) || snapshot.timestamp < run.submittedAt || snapshot.snapshotId === run.beforeSubmit) return;
+  if (scope.surface === 'BROWSER_ORGANIC') {
+    run.outcomeWhy = 'BROWSER_QUERY_OR_ORGANIC_SURFACE_UNPROVEN';
+    if (snapshot.web?.status !== 'DOM_AVAILABLE' || !verifyBrowserSearch(snapshot, scope.query) || snapshot.web.document.readyState !== 'complete' ||
+      snapshot.nodes.some(n => n.displayed !== false && n.focused && /EditText|AutoCompleteTextView/.test(n.className))) return;
+    const signature = JSON.stringify([snapshot.web.document.url, snapshot.web.document.links.map(l => [l.url, l.title])]);
+    if (run.outcomeSignature !== signature) { run.outcomeSignature = signature; run.outcomeSnapshot = snapshot.snapshotId; return; }
+    if (run.outcomeSnapshot === snapshot.snapshotId) return;
+    return { query: scope.query, status: 'RESULTS', count: snapshot.web.document.links.length, submission: run.submission };
+  }
   run.outcomeWhy = 'QUERY_ECHO_MISSING_OR_AMBIGUOUS';
   const rows = observedAffordances(snapshot, scope.executionId, scope.sessionId);
   const echo = rows.filter(r => r.text === scope.query && (isScopedSearchField(scope.id, r) || /(?:search|query)/.test(r.resourceId.split('/').at(-1) ?? '')));

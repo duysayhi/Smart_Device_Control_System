@@ -13,17 +13,30 @@ import { verifyPersistenceReadback, type RecordDraftScope } from './record-persi
 import { searchResult, searchCommitState, type SearchScope } from './generic-search';
 import { NativeFactSchema, verifyNativeFact, type EvidenceAssessment } from './read-only-verifiers';
 import { structuralRoles } from './widget-semantics';
+import { browserResultReadback, type BrowserResultScope } from './browser-result';
 
 const issued = new WeakSet<VerifiedEvidence>();
+const searchScopes = new WeakMap<VerifiedEvidence, Readonly<{ sessionId: string; packageName: string; surface?: 'BROWSER_ORGANIC' }>>();
 export const isVerifiedEvidence = (evidence: VerifiedEvidence) => issued.has(evidence);
+export const searchEvidenceScope = (evidence: VerifiedEvidence) => searchScopes.get(evidence);
+export function verifyBrowserResultOutcome(scope: BrowserResultScope, snapshot: Observation, context: VerificationContext): VerifiedEvidence | undefined {
+  if (scope.deviceId !== context.deviceId || scope.executionId !== context.executionId || scope.nodeId !== context.nodeId || scope.packageName !== context.packageName ||
+    !verifyPredicate({ kind: 'FOREGROUND_IS', packageName: context.packageName }, snapshot, context).evidence) return;
+  const result = browserResultReadback(scope, snapshot); if (!result) return;
+  const proof: VerifiedEvidence = Object.freeze({ id: randomUUID(), deviceId: context.deviceId, executionId: context.executionId, nodeId: context.nodeId,
+    snapshotId: snapshot.snapshotId, observedAt: snapshot.timestamp, provider: 'BROWSER_RESULT_V2', verified: true,
+    predicate: { kind: 'BROWSER_RESULT_MATCHES' as const, query: scope.query, ordinal: 1 as const, surface: 'BROWSER_ORGANIC' as const }, browserResult: result });
+  issued.add(proof); return proof;
+}
 export function verifySearchOutcome(scope: SearchScope, snapshot: Observation, context: VerificationContext): VerifiedEvidence | undefined {
   if (scope.deviceId !== context.deviceId || scope.executionId !== context.executionId || scope.nodeId !== context.nodeId || scope.packageName !== context.packageName ||
     !verifyPredicate({ kind: 'FOREGROUND_IS', packageName: context.packageName }, snapshot, context).evidence) return;
   const result = searchResult(scope, snapshot); if (!result) return;
   const proof: VerifiedEvidence = Object.freeze({ id: randomUUID(), deviceId: context.deviceId, executionId: context.executionId, nodeId: context.nodeId,
-    snapshotId: snapshot.snapshotId, observedAt: snapshot.timestamp, provider: 'NATIVE_SEARCH_V2', predicate: { kind: 'SEARCH_OUTCOME_MATCHES' as const, query: result.query }, verified: true, search: Object.freeze(result),
+    snapshotId: snapshot.snapshotId, observedAt: snapshot.timestamp, provider: scope.surface === 'BROWSER_ORGANIC' ? 'BROWSER_SEARCH_V2' : 'NATIVE_SEARCH_V2', predicate: { kind: 'SEARCH_OUTCOME_MATCHES' as const, query: result.query }, verified: true, search: Object.freeze(result),
     assessment: Object.freeze({ evidenceClass: result.status === 'NO_RESULTS' ? 'EXPLICIT_EMPTY_STATE' as const : 'CORRELATED_RESULT_STATE' as const, confidence: 'CORRELATED' as const,
       why: 'Exact committed query plus independent outcome surface; successful RPC alone is not completion and submit causality is not asserted.' }) });
+  searchScopes.set(proof, Object.freeze({ sessionId: scope.sessionId, packageName: scope.packageName, ...(scope.surface ? { surface: scope.surface } : {}) }));
   issued.add(proof); return proof;
 }
 export function verifyMediaView(receipt: MediaViewReceipt, context: VerificationContext, physicalId: string): VerifiedEvidence | undefined {

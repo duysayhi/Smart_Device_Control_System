@@ -1,6 +1,13 @@
+import type { JsonReasoner } from './ollama';
+
 const commands = new WeakMap<object, string>();
 export function issueCloudCommand(source: string): object {
   const ref = Object.freeze({}); commands.set(ref, source.normalize('NFC')); return ref;
+}
+export function bindCommandSource(provider: JsonReasoner, source: string): JsonReasoner {
+  const commandRef = issueCloudCommand(source);
+  return { generate: (schema, system, input, budget, signal) => provider.generate(schema, system,
+    input && typeof input === 'object' ? { ...input, commandRef } : input, budget, signal) };
 }
 // Explicit opt-in sends owner-authored command text to Groq, never screen text.
 // Entire sensitive commands are withheld rather than partially redacted/guessed.

@@ -18,6 +18,7 @@ import { understandOutcomes } from './outcome-spec';
 import { TemporalRequestSchema, type TemporalRequest } from './temporal-contract';
 import { isClarifiedTemporal } from './temporal-clarification';
 import { temporalUiCandidateAllowed } from './temporal-ui';
+import { browserResultCandidateAllowed } from './browser-result';
 
 export interface EffectGrant {
   id: string; deviceId: string; executionId: string; nodeId: string; sessionId: string; packageName: string;
@@ -39,6 +40,8 @@ export function assertEffectGrantAuthorization(grant: EffectGrant) {
 export function issueEffectGrant(candidate: GroundedCandidateV2, node: GoalNodeV2, owner?: OwnerTestExecution, ticket?: LocalEffectTicket): EffectGrant {
   if (ticket && !owner?.fullControl) throw Error('HARD_DENY: local journal tickets require full-control scope.');
   const authorizedSearch = node.capability === 'SEARCH' && candidate.effect === 'READ' && searchCandidateAllowed(candidate, node);
+  const authorizedBrowserResult = browserResultCandidateAllowed(candidate, node);
+  if (node.capability === 'OPEN_RESULT' && !authorizedBrowserResult) throw Error('Browser result has no issued search/organic scope.');
   if (node.capability === 'SEARCH' && !authorizedSearch) throw Error('Search action/query has no issued scope.');
   if (owner) {
     assertOwnerTestExecution(owner, candidate.deviceId, owner.physicalId, candidate.executionId);
@@ -69,7 +72,7 @@ export function issueEffectGrant(candidate: GroundedCandidateV2, node: GoalNodeV
       (typeof record[step.field] === 'boolean' ? candidate.action === 'CLICK' && candidate.target.roles.includes('checkable') && candidate.desired === record[step.field] && candidate.target.checked !== candidate.desired : candidate.action === 'SET_VALUE' && candidate.value === record[step.field]) :
       candidate.action === 'CLICK' && (step.phase === 'SAVE' ? candidate.target.roles.includes('save') && Boolean(step.identity) : ['CREATE', 'REOPEN'].includes(step.phase)));
     if (!authorizedToggle && !authorizedCalculation && !authorizedCapture && !authorizedRecord && !temporalUiCandidateAllowed(candidate, node)) throw new Error('Effect/value exceeds the requested local operation.');
-  } else if (!authorizedSearch && node.capability !== 'NAVIGATE' && candidate.action !== 'BACK') throw new Error('Read candidate outside navigation scope.');
+  } else if (!authorizedSearch && !authorizedBrowserResult && node.capability !== 'NAVIGATE' && candidate.action !== 'BACK') throw new Error('Read candidate outside navigation scope.');
   const grant = Object.freeze({ id: randomUUID(), deviceId: candidate.deviceId, executionId: candidate.executionId, nodeId: node.id, sessionId: candidate.sessionId,
     packageName: node.packageName!, candidate, expiresAt: Date.now() + 5000, ...(owner ? { ownerAuthorizationId: owner.id } : {}) });
   if (owner) owners.set(grant, owner);

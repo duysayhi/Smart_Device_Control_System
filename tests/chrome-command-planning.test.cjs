@@ -19,7 +19,7 @@ Module._load = function (name, parent, main) {
   } };
   return load.call(this, name.startsWith('@/') ? path.resolve(__dirname, '..', name.slice(2)) : name, parent, main);
 };
-const { POST } = require('../app/api/commands/interpret/route.ts');
+const { handleLegacyInterpret: POST } = require('../lib/android/unified-agent/legacy-interpret-handler.ts');
 const request = prompt => new Request('http://localhost/api/commands/interpret', { method: 'POST', headers: { Origin: 'http://localhost', 'Content-Type': 'application/json' }, body: JSON.stringify({ prompt }) });
 
 test('Chrome search prepares the address bar before typing and never waits for video_list', () => {
@@ -75,7 +75,7 @@ test('Agent planner recognizes article selection without asking the model or dro
   assert.equal(result.goal.spec.ordinal, 2); assert.equal(result.goal.subgoals.at(-1).criterion.target, 'result_2'); assert.equal(calls, 0);
 });
 
-test('interpret endpoint returns complete Chrome plan locally and rejects malformed model plans', async () => {
+test('internal legacy interpret handler returns complete Chrome plan locally and rejects malformed model plans', async () => {
   const old = process.env.ANDROID_EXECUTOR_BACKEND; process.env.ANDROID_EXECUTOR_BACKEND = 'appium';
   try {
     const before = modelCalls;

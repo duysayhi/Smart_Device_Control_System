@@ -12,7 +12,7 @@ const fold = (s: string) => s.normalize('NFD').replace(/[\u0300-\u036f]/g, '').r
 // Source-exact grammar produces a typed contract, not an executable UI script.
 export function parseTemporal(source: string): TemporalParse | undefined {
   const s = fold(source).replace(/[.!?]+$/, '').replace(/^(?:please|hay|vui long)\s+/, '');
-  const alarm = /^(?:(?:dat|tao|them|set|create|add)\s+(?:an?\s+)?)?(?:bao thuc|alarm)\s+(?:(?:for|at|luc|vao)\s+)?(.+)$/.exec(s);
+  const alarm = /^(?:(?:dat|cai(?:\s+dat)?|tao|them|set|create|add)\s+(?:an?\s+)?)?(?:bao thuc|alarm)\s+(?:(?:for|at|luc|vao)\s+)?(.+)$/.exec(s);
   if (alarm) {
     let value = alarm[1], timeZone: string | undefined;
     const suffix = /\s+(?:timezone|mui gio)\s+([a-z_]+\/[a-z_]+(?:\/[a-z_]+)?)$/i.exec(value);

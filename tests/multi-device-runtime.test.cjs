@@ -211,20 +211,24 @@ test('SIMULATION: Dashboard retains multi-selection, renders independent progres
 function humanAdapter() {
   const instances = new Map();
   const adapter = { discover: async () => devices, async plan(request, budget) {
-    const { goal } = await planGoal(request, budget); goal.currentSubgoal = 2; goal.subgoals[0].status = goal.subgoals[1].status = 'VERIFIED'; return goal;
+    const { goal } = await planGoal(request, budget);
+    if (goal.spec.operation !== 'SEARCH' || goal.subgoals.length !== 2) throw Error('Human fixture requires a two-step search goal.');
+    goal.currentSubgoal = 1; goal.subgoals[0].status = 'VERIFIED'; return goal;
   }, async open(goal, budget, serial) {
     const visual = { id: randomUUID(), status: 'HUMAN_REQUIRED', coherent: true, ordinalVerified: true, expiresAt: Date.now() + 10000,
       image: { dataUrl: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/N3sAAAAASUVORK5CYII=', crop: [0, 0, 1, 1] } };
     const state = { taps: 0, closed: 0 }; instances.set(serial, state);
-    const before = snapshot(goal.packageName); before.screen = 'SEARCH_RESULTS'; before.nodes = [{ ...snapshot(goal.packageName, true).nodes[0], className: 'android.view.View', resourceId: goal.packageName + ':id/search_query', text: goal.spec.query }];
+    const before = snapshot(goal.packageName); before.screen = 'SEARCH_INPUT'; before.nodes = [
+      { ...snapshot(goal.packageName, true).nodes[0], className: 'android.widget.EditText', resourceId: goal.packageName + ':id/query_input', text: goal.spec.query, focused: false },
+      { ...snapshot(goal.packageName, true).nodes[0], className: 'android.widget.Button', resourceId: goal.packageName + ':id/search_button', text: 'Search', clickable: true, bounds: [10, 500, 390, 600] },
+    ];
     before.deviceSerial = serial;
-    const after = snapshot(goal.packageName); after.screen = 'VIDEO_PLAYER';
+    const after = snapshot(goal.packageName); after.screen = 'SEARCH_RESULTS';
     after.deviceSerial = serial;
-    after.nodes = [{ ...before.nodes[0], resourceId: goal.packageName + ':id/video_title', text: 'Simulated podcast' }];
-    after.playback = { source: 'ADB_MEDIA_SESSION', packageName: goal.packageName, title: 'Simulated podcast', positionMs: 2000, previousPositionMs: 1000 };
-    return { backend: 'appium', observe: async () => ({ ...before, timestamp: Date.now(), snapshotId: randomUUID() }), discoveryMemory() {}, verificationSnapshot: () => ({ ...after, timestamp: Date.now() }),
+    after.nodes = [{ ...before.nodes[0], className: 'android.widget.TextView', resourceId: goal.packageName + ':id/search_query', text: goal.spec.query }];
+    return { backend: 'appium', observe: async () => ({ ...(state.taps ? after : before), timestamp: Date.now(), snapshotId: randomUUID() }), discoveryMemory() {}, verificationSnapshot: () => state.taps ? ({ ...after, timestamp: Date.now() }) : undefined,
       async execute() { const error = new AndroidExecutionError('AMBIGUOUS', 'Activation requires a human point'); error.visual = visual; throw error; },
-      async confirmVisualTap(choice) { assert.equal(choice.evidenceId, visual.id); state.taps++; return { verification: 'VERIFIED', selection: { itemType: 'video', ordinal: 2, title: 'Simulated podcast', identity: serial } }; },
+      async confirmVisualTap(choice) { assert.equal(choice.evidenceId, visual.id); state.taps++; return { verification: 'VERIFIED' }; },
       async close() { state.closed++; } };
   } };
   return { adapter, instances };
@@ -232,7 +236,7 @@ function humanAdapter() {
 test('SIMULATION: Human Assistance is bound to device/execution/token; confirming A never resumes B', async () => {
   const { adapter, instances } = humanAdapter();
   const registry = new DeviceRuntimeRegistry(adapter);
-  const tasks = await start(registry, devices.map(d => ({ deviceId: d.serial, goal: 'Mở YouTube, tìm podcast và phát video thứ hai.' })));
+  const tasks = await start(registry, devices.map(d => ({ deviceId: d.serial, goal: 'Mở YouTube, tìm podcast' })));
   await until(() => registry.list().every(t => t.status === 'WAITING_HUMAN'));
   const [a, b] = registry.list(), assistance = a.latest.assistance;
   const input = { type: 'ASSIST', executionId: a.executionId, deviceId: a.deviceId, token: assistance.token, evidenceId: assistance.evidenceId, x: 120, y: 120, confirmed: true };
@@ -315,7 +319,7 @@ test('SIMULATION HTTP: polling excludes image bytes; evidence is fetched only fo
   try {
     const address = JSON.parse(await promises.readFile(path.join(directory, 'address.json'), 'utf8'));
     const base = `http://127.0.0.1:${address.port}`, headers = { Authorization: 'Bearer ' + address.token, 'Content-Type': 'application/json' };
-    await start(worker.registry, devices.map(device => ({ deviceId: device.serial, goal: 'Mở YouTube, tìm podcast và phát video thứ hai.' })));
+    await start(worker.registry, devices.map(device => ({ deviceId: device.serial, goal: 'Mở YouTube, tìm podcast' })));
     await until(() => worker.registry.list().every(task => task.status === 'WAITING_HUMAN'));
     const text = await (await fetch(base + '/tasks', { headers })).text(); assert.doesNotMatch(text, /data:image/);
     const [a, b] = JSON.parse(text).tasks;

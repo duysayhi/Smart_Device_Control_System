@@ -10,7 +10,7 @@ import { bindDiscoveredApplication, isVerifiedApplication, type DiscoveredApplic
 import { assertLegacyCoverage, legacyActionWords } from './outcome-spec';
 import { assertSafeSource } from '../safety-envelope';
 
-function clearGoal(request: string): GoalSpec | undefined {
+export function clearGoal(request: string): GoalSpec | undefined {
   const chrome = parseChromeRequest(request);
   if (chrome?.query) return { app: 'chrome', operation: chrome.ordinal ? 'OPEN_RESULT' : 'SEARCH', query: chrome.query,
     resultType: 'browser', ...(chrome.ordinal ? { ordinal: chrome.ordinal } : {}), isSensitive: false };
