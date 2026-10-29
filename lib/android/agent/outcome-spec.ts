@@ -3,8 +3,11 @@ import { maximalValueSpan } from './source-value';
 import { IntentBindingSchema } from './intent-schema';
 import { enterSearchBoundary, politeWords, trimValueSyntax } from './natural-phrasing';
 import { parseTemporal, TemporalRequestSchema } from './temporal-contract';
+import { matchReadStateSource } from './intent-capabilities';
+import { BrowserResultSchema, browserResultRequest, browserResultDescriptor } from './browser-result-contract';
+import { VideoResultSchema, videoPlayOrdinal, videoResultDescriptor } from './video-result-contract';
 
-export const OutcomeKind = z.enum(['LAUNCH', 'NAVIGATE', 'SEARCH', 'CALCULATE', 'CREATE_RECORD', 'CAPTURE_MEDIA', 'SET_STATE', 'SET_STRUCTURED_STATE', 'ALARM', 'TIMER', 'FIND_ARTIFACT', 'INTENT', 'UNKNOWN']);
+export const OutcomeKind = z.enum(['LAUNCH', 'NAVIGATE', 'SEARCH', 'OPEN_RESULT', 'SELECT_RESULT', 'CALCULATE', 'CREATE_RECORD', 'CAPTURE_MEDIA', 'SET_STATE', 'SET_STRUCTURED_STATE', 'ALARM', 'TIMER', 'FIND_ARTIFACT', 'INTENT', 'UNKNOWN']);
 export const OutcomeV2Schema = z.object({
   id: z.string().min(1), kind: OutcomeKind, span: z.object({ start: z.number().int().nonnegative(), end: z.number().int().positive(), text: z.string().min(1) }).strict(),
   app: z.string().min(1).max(150).optional(), value: z.string().max(1000), negated: z.boolean(),
@@ -12,6 +15,8 @@ export const OutcomeV2Schema = z.object({
   effect: z.enum(['READ', 'LOCAL_WRITE', 'SENSITIVE', 'UNKNOWN']), ambiguity: z.array(z.string()).max(8),
   intent: IntentBindingSchema.optional(),
   temporal: TemporalRequestSchema.optional(),
+  browserResult: BrowserResultSchema.optional(),
+  videoResult: VideoResultSchema.optional(),
 }).strict();
 export const OutcomeSpecV2Schema = z.object({ version: z.literal(2), request: z.string().min(1).max(2000), outcomes: z.array(OutcomeV2Schema).min(1).max(16) }).strict();
 export type OutcomeV2 = z.infer<typeof OutcomeV2Schema>;
@@ -37,7 +42,8 @@ export function commandMask(request: string): string {
 
 export function sourceClauseSpans(request: string): { start: number; end: number; text: string }[] {
   const mask = commandMask(request), spans: { start: number; end: number; text: string }[] = [];
-  const boundary = /(?:(?:[,;!?]\s*|\.\s+)(?:(?:and|then|but|va|roi|sau do|tiep theo|nhung)\s+)*|\s+(?:and|then|but|va|roi|sau do|tiep theo|nhung)\s+)(?=(?:(?:please|hay|vui long)\s+)?(?:(?:do not|don't|never|khong(?: duoc)?|dung)\s+)?(?:open|launch|start|bring up|visit|show|view|see|search|find|look for|loc|do|lookup|calculate|compute|work out|create|add|save|capture|take|set|delete|erase|uninstall|send|share|play|mo|khoi chay|chon|xem|doc|di den|tim|tra cuu|tinh|tao|them|luu|chup|dat|bat|tat|xoa|gui|dang|chia se|thanh toan|ket noi|phat)\b)/g;
+  const verbs = '(?:open|launch|start|bring up|visit|show|view|see|read|check|tell me|what is|what\'s|how much|is|kiem tra|biet|search|find|look for|loc|do|lookup|calculate|compute|work out|create|add|save|capture|take|set|delete|erase|uninstall|send|share|play|mo|khoi chay|chon|xem|doc|di den|tim|tra cuu|tinh|tao|them|luu|chup|dat|cai(?=\\s+(?:dat\\s+)?bao thuc\\b)|bat|tat|xoa|gui|dang|chia se|thanh toan|ket noi|phat)';
+  const boundary = new RegExp('(?:(?:[,;!?]\\s*|\\.\\s+)(?:(?:and|then|but|va|roi|sau do|tiep theo|nhung)\\s+)*|\\s+(?:and|then|but|va|roi|sau do|tiep theo|nhung)\\s+)(?=(?:(?:' + politeWords + ')\\s+)*(?:(?:do not|don\'t|never|khong(?: duoc)?|dung)\\s+)?' + verbs + '\\b)', 'g');
   const add = (start: number, end: number) => {
     while (start < end && /\s/.test(request[start])) start++;
     while (end > start && /\s/.test(request[end - 1])) end--;
@@ -70,7 +76,7 @@ function parseOutcomes(request: string, generalized: boolean): OutcomeSpecV2 {
   let spans = sourceClauseSpans(request);
   if (!generalized) {
     // V1's existing result/playback planner owns these phrases; preserve its boundary contract.
-    const verbs = '(?:(?:khong(?: duoc)?|dung)\\s+)?(?:mo|khoi chay|open|launch|tim(?: kiem)?|search|tra cuu|chon|xem|doc|di den|tinh|calculate|tao|them|luu|dat|chup|capture|bat|tat|gui|xoa|dang|chia se|thanh toan|ket noi)';
+    const verbs = '(?:(?:khong(?: duoc)?|dung)\\s+)?(?:mo|khoi chay|open|launch|tim(?: kiem)?|search|tra cuu|chon|xem|doc|di den|tinh|calculate|tao|them|luu|dat|cai(?=\\s+(?:dat\\s+)?bao thuc\\b)|chup|capture|bat|tat|gui|xoa|dang|chia se|thanh toan|ket noi)';
     const boundaries = new RegExp(`(?:^|[,;.!?]\\s*|\\s+(?:va|roi|sau do|tiep theo|and|then)\\s+)(?=${verbs}\\b)`, 'g'), starts = [0];
     for (const m of commandMask(request).matchAll(boundaries)) { const start = m.index! + m[0].length; if (start && !starts.includes(start)) starts.push(start); }
     spans = starts.map((start, i) => {
@@ -83,6 +89,9 @@ function parseOutcomes(request: string, generalized: boolean): OutcomeSpecV2 {
     const polite = generalized ? new RegExp('^(?:(?:' + politeWords + ')\\s+)*').exec(commandMask(text))![0].length : 0;
     const withoutCourtesy = normalized.slice(polite), negated = /^(khong(?: duoc)?|dung|do not|don't|never)\s/.test(withoutCourtesy);
     const command = withoutCourtesy.replace(/^(khong(?: duoc)?|dung|do not|don't|never)\s+/, '');
+    const read = generalized ? matchReadStateSource(text) : undefined;
+    if (read) return { id: `outcome-${index + 1}`, kind: 'INTENT', span: { start, end, text }, value: text,
+      negated: false, effect: 'READ', ambiguity: [], intent: read };
     const time = generalized ? parseTemporal(command) : undefined;
     if (time && !/^(?:dat|tao|them)\s+bao thuc\s+(?:0\d|1\d|2[0-3]):[0-5]\d$/.test(command)) return {
       id: `outcome-${index + 1}`, kind: time.kind, span: { start, end, text }, value: text, negated, effect: 'LOCAL_WRITE',
@@ -127,6 +136,28 @@ function parseOutcomes(request: string, generalized: boolean): OutcomeSpecV2 {
     return { id: `outcome-${index + 1}`, kind, span: { start, end, text }, ...(kind === 'LAUNCH' ? { app: value.replace(/^["']|["']$/g, '') } : explicitApp ? { app: explicitApp } : {}), value, negated,
       effect: ['CREATE_RECORD', 'CAPTURE_MEDIA', 'SET_STATE', 'SET_STRUCTURED_STATE'].includes(kind) ? 'LOCAL_WRITE' : kind === 'UNKNOWN' ? 'UNKNOWN' : 'READ', ambiguity };
   });
+  if (generalized) {
+    // Preserve an explicitly app-qualified SEARCH as one original clause. The
+    // existing V2 foreground guard performs the implied launch if necessary.
+    if (outcomes.length === 2 && outcomes[0].kind === 'SEARCH' && videoPlayOrdinal(outcomes[1].span.text)) {
+      const suffix = /\s+(?:tren|on|in)\s+(youtube|com\.google\.android\.youtube)$/.exec(foldIntent(outcomes[0].value));
+      if (suffix) outcomes[0] = { ...outcomes[0], app: outcomes[0].value.slice(suffix.index + suffix[0].lastIndexOf(suffix[1])),
+        value: outcomes[0].value.slice(0, suffix.index), ambiguity: outcomes[0].ambiguity.filter(a => a !== 'AMBIGUOUS_QUERY_APPLICATION_BOUNDARY') };
+    }
+    const selectIndex = outcomes.length - 1, searchIndex = selectIndex - 1;
+    const ordinal = [2, 3].includes(outcomes.length) ? videoPlayOrdinal(outcomes[selectIndex].span.text) : undefined;
+    const application = outcomes.length === 3 && outcomes[0].kind === 'LAUNCH' ? outcomes[0].app : outcomes.length === 2 ? outcomes[0].app : undefined;
+    if (ordinal && videoResultDescriptor.applications.includes(foldIntent(application ?? '')) &&
+      outcomes[searchIndex].kind === 'SEARCH' && outcomes[searchIndex].value && !outcomes.slice(0, selectIndex).some(o => o.negated || o.ambiguity.length) && !outcomes[selectIndex].negated) {
+      outcomes[selectIndex] = { ...outcomes[selectIndex], kind: 'SELECT_RESULT', app: application, effect: 'READ', ambiguity: [],
+        videoResult: { surface: 'YOUTUBE_LONG_VIDEO', query: outcomes[searchIndex].value, ordinal, play: true } };
+    }
+    const result = browserResultRequest(request);
+    if (result && outcomes.length === 3 && outcomes[0].kind === 'LAUNCH' && browserResultDescriptor.applications.includes(foldIntent(outcomes[0].app ?? '')) &&
+      outcomes[1].kind === 'SEARCH' && outcomes[1].value === result.query && !outcomes.some(o => o.negated || o.ambiguity.length)) {
+      outcomes[2] = { ...outcomes[2], kind: 'OPEN_RESULT', app: outcomes[0].app, effect: 'READ', browserResult: result };
+    }
+  }
   return OutcomeSpecV2Schema.parse({ version: 2, request, outcomes });
 }
 

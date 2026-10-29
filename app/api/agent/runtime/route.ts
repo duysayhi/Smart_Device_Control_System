@@ -1,6 +1,8 @@
 import { RuntimeCommand, EvidenceQuery } from '@/lib/android/agent/runtime-schema';
 import { workerRequest } from '@/lib/android/agent/worker-client';
 import { isLocalSameOrigin, isLocalMutation } from '@/lib/android/agent/request-origin';
+import { LEGACY_ENTRY_ENABLED, legacyEntryDenied } from '@/lib/android/unified-agent/legacy-entry';
+import { assertSafeSource } from '@/lib/android/safety-envelope';
 export async function GET(request: Request) {
   if (!isLocalSameOrigin(request)) return Response.json({ error: 'Origin không hợp lệ.' }, { status: 403 });
   const query = new URL(request.url).searchParams;
@@ -19,6 +21,11 @@ export async function POST(request: Request) {
   if (!isLocalMutation(request)) return Response.json({ error: 'Origin không hợp lệ.' }, { status: 403 });
   const command = RuntimeCommand.safeParse(await request.json().catch(() => null));
   if (!command.success) return Response.json({ error: 'Lệnh runtime không hợp lệ.' }, { status: 400 });
+  if (command.data.type === 'START') {
+    try { for (const job of command.data.jobs) assertSafeSource(job.goal); }
+    catch { return Response.json({ error: 'HARD_DENY: unsafe source; no execution authorized.' }, { status: 403 }); }
+    if (!LEGACY_ENTRY_ENABLED) return legacyEntryDenied();
+  }
   try { const response = await workerRequest('POST', command.data); return Response.json(await response.json(), { status: response.status }); }
   catch { return Response.json({ error: 'Runtime worker không sẵn sàng. Kiểm tra trạng thái trước khi gửi lại.' }, { status: 503 }); }
 }

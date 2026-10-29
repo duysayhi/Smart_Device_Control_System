@@ -17,12 +17,14 @@ export class SearchNeedsUserAction extends SearchBlocked {
 }
 
 export async function runGenericSearch(input: { node: GoalNodeV2; deviceId: string; executionId: string; execution: V2Execution; budget: AgentBudget; signal?: AbortSignal; ownerScope?: OwnerTestExecution;
+  surface?: 'BROWSER_ORGANIC';
+  videoSearch?: boolean;
   fresh(carry?: Observation): Promise<Observation>; choose(candidates: GroundedCandidateV2[]): Promise<string>;
   keyboard?(): Promise<KeyboardVisibility>;
   userAction?(action: SearchUserAction): Promise<void>;
   progress(state: NonNullable<V2Progress['search']>, candidate?: GroundedCandidateV2): void }) {
   const { node, execution, budget, signal } = input;
-  const scope = beginSearch(node, input.deviceId, input.executionId, execution.sessionId()!);
+  const scope = beginSearch(node, input.deviceId, input.executionId, execution.sessionId()!, input.surface, input.videoSearch);
   const attempts = new Set<string>(); let submitted = false, renewals = 0, carry: Observation | undefined;
   try {
     for (let i = 0; i < 10; i++) {
@@ -57,7 +59,7 @@ export async function runGenericSearch(input: { node: GoalNodeV2; deviceId: stri
       const key = c.search!.phase + ':' + c.target.resourceId + ':' + c.target.label + ':' + c.target.index;
       if (attempts.has(key)) throw new SearchBlocked('SEARCH_EFFECT_REPLAY_BLOCKED');
       attempts.add(key); budget.consume('steps');
-      if (['OPEN', 'MENU', 'RESET'].includes(c.search!.phase)) budget.consume('recoverySubtasks');
+      if (['OPEN', 'MENU', 'RESET', 'REVEAL', 'CLOSE_MINI'].includes(c.search!.phase)) budget.consume('recoverySubtasks');
       input.progress({ phase: c.search!.phase === 'ENTER' ? 'ENTER_SEARCH_QUERY' : c.search!.phase === 'SUBMIT' ? 'SUBMIT_SEARCH' : 'NAVIGATE_TO_SEARCH', query: scope.query }, c);
       const start = performance.now();
       try { carry = await execution.interactV2(issueEffectGrant(c, node, input.ownerScope), signal); }

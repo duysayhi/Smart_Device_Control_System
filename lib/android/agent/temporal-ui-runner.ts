@@ -87,6 +87,7 @@ export async function runTemporalUi(input: {
     let first = await input.fresh();
     const deadline = performance.now() + Math.min(10000, budget.remaining());
     while (runningTimer(first) === undefined && performance.now() < deadline) first = await input.fresh();
+    if (runningTimer(first) === undefined) throw Error('UI_TIMER_RUNNING_DECREASE_UNVERIFIED: no running countdown observed; no Start replay.');
     noteTemporalTimerRead(scope, first);
     await delay(1500, undefined, { signal });
     const second = await input.fresh(); noteTemporalTimerRead(scope, second);

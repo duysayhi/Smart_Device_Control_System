@@ -7,8 +7,8 @@ export const GoalGraphV2Schema = z.object({
   version: z.literal(2), id: z.string().min(1), deviceId: z.string().min(1), executionId: z.string().min(1), original: OutcomeSpecV2Schema,
   coverage: z.enum(['COMPLETE', 'UNSUPPORTED_OUTCOME', 'NEEDS_CLARIFICATION']),
   nodes: z.array(z.object({ id: z.string().min(1), outcome: OutcomeV2Schema, dependencies: z.array(z.string()).max(16),
-    app: z.string().optional(), packageName: z.string().optional(), capability: OutcomeKind,
-    preconditions: z.array(z.string()).max(8), predicates: z.array(z.enum(['FOREGROUND_IS', 'ELEMENT_VISIBLE', 'TEXT_EQUALS', 'VALUE_EQUALS', 'ITEM_SELECTED', 'RECORD_READBACK_MATCHES', 'TEMPORAL_READBACK_MATCHES', 'ARTIFACT_EXISTS', 'ARTIFACT_IDENTITY_MATCHES', 'SEARCH_OUTCOME_MATCHES', 'INTENT_OUTCOME_VERIFIED'])).max(8),
+    app: z.string().optional(), packageName: z.string().optional(), capability: z.enum([...OutcomeKind.options, 'VERIFY_PLAYBACK']),
+    preconditions: z.array(z.string()).max(8), predicates: z.array(z.enum(['FOREGROUND_IS', 'ELEMENT_VISIBLE', 'TEXT_EQUALS', 'VALUE_EQUALS', 'ITEM_SELECTED', 'RECORD_READBACK_MATCHES', 'TEMPORAL_READBACK_MATCHES', 'ARTIFACT_EXISTS', 'ARTIFACT_IDENTITY_MATCHES', 'SEARCH_OUTCOME_MATCHES', 'BROWSER_RESULT_MATCHES', 'VIDEO_RESULT_MATCHES', 'MEDIA_PLAYBACK_PROGRESS', 'INTENT_OUTCOME_VERIFIED'])).max(8),
     inputs: z.array(z.string()).max(16), outputs: z.array(z.string()).max(16), status: z.enum(['PENDING', 'RUNNING', 'VERIFIED', 'SAFE_BLOCKED']), reason: z.string().optional(), evidenceIds: z.array(z.string()).max(16),
   }).strict()).min(1).max(16),
 }).strict().superRefine((graph, ctx) => {
@@ -16,7 +16,14 @@ export const GoalGraphV2Schema = z.object({
   if (graph.primitiveBindings && (graph.primitiveBindings.length !== graph.nodes.length || graph.primitiveBindings.some((binding, i) =>
     binding.nodeId !== graph.nodes[i].id || binding.source.start !== graph.nodes[i].outcome.span.start || binding.source.end !== graph.nodes[i].outcome.span.end ||
     binding.state === 'DISCOVERY_REQUIRED' && !binding.missing.length))) ctx.addIssue({ code: 'custom', message: 'Primitive binding must preserve its source parent and missing contracts.' });
-  if (ids.size !== graph.nodes.length || graph.original.outcomes.length !== graph.nodes.length || graph.nodes.some((node, i) => node.id !== graph.original.outcomes[i].id || JSON.stringify(node.outcome) !== JSON.stringify(graph.original.outcomes[i]) || node.capability !== node.outcome.kind)) ctx.addIssue({ code: 'custom', message: 'Graph must preserve every original outcome exactly.' });
+  // Only this deterministic verification child may expand a source outcome. It
+  // preserves the source object; no extra requested action can be introduced.
+  const expected = graph.original.outcomes.flatMap(o => o.kind === 'SELECT_RESULT' && o.videoResult
+    ? [{ id: o.id, capability: o.kind, outcome: o }, { id: o.id + ':playback', capability: 'VERIFY_PLAYBACK', outcome: o }]
+    : [{ id: o.id, capability: o.kind, outcome: o }]);
+  if (ids.size !== graph.nodes.length || expected.length !== graph.nodes.length || graph.nodes.some((node, i) =>
+    node.id !== expected[i]?.id || node.capability !== expected[i]?.capability || JSON.stringify(node.outcome) !== JSON.stringify(expected[i]?.outcome) ||
+    node.capability === 'VERIFY_PLAYBACK' && (JSON.stringify(node.dependencies) !== JSON.stringify([node.outcome.id]) || JSON.stringify(node.predicates) !== JSON.stringify(['MEDIA_PLAYBACK_PROGRESS'])))) ctx.addIssue({ code: 'custom', message: 'Graph must preserve every original outcome exactly.' });
   const reached = new Set<string>();
   for (const node of graph.nodes) {
     if (node.dependencies.some(id => !ids.has(id) || !reached.has(id)) || node.status === 'VERIFIED' && !node.evidenceIds.length) ctx.addIssue({ code: 'custom', message: 'Unverified graph state, cyclic or non-topological dependency.' });
@@ -27,7 +34,7 @@ export const GoalGraphV2Schema = z.object({
 export type V2NodeStatus = 'PENDING' | 'RUNNING' | 'VERIFIED' | 'SAFE_BLOCKED';
 export interface GoalNodeV2 {
   id: string; outcome: OutcomeV2; dependencies: string[]; app?: string; packageName?: string;
-  capability: OutcomeV2['kind']; preconditions: string[]; predicates: string[]; inputs: string[]; outputs: string[];
+  capability: OutcomeV2['kind'] | 'VERIFY_PLAYBACK'; preconditions: string[]; predicates: string[]; inputs: string[]; outputs: string[];
   status: V2NodeStatus; reason?: string; evidenceIds: string[];
 }
 export interface GoalGraphV2 {
@@ -40,6 +47,12 @@ export interface V2Assistance {
   expiresAt: number; choices: { id: string; label: string }[]; reason: string; sessionRetained: boolean;
 }
 export interface V2Progress {
+  youtube?: { state: import('./youtube-state').YouTubeState; playback?: import('./video-result').VideoPlaybackStatus; maxObservations: number; waitMs: number; intervalMs: number;
+    snapshotId?: string; controls?: { label: string; resourceId: string }[] };
+  videoDiscovery?: { query: string; ordinal: number; physicalId: string; snapshotId: string; searchEvidenceId: string; anchored: boolean;
+    items: { identity: string; title: string; itemType: string; ordinal: number }[] };
+  videoResult?: { query: string; ordinal: number; identity: string; title: string; channel?: string; searchEvidenceId: string; selectionEvidenceId: string; playbackEvidenceId?: string; positionMs?: number; previousPositionMs?: number; identityTier?: 'UI_TITLE_CHANNEL' | 'UI_CHANNEL_DURATION_PROGRESS' };
+  browserResult?: { query: string; ordinal: 1; surface: 'BROWSER_ORGANIC'; url: string; title: string; searchEvidenceId: string; evidenceId: string };
   temporal?: { kind: 'ALARM' | 'TIMER'; identity: string; evidenceId: string; zone: string; request: import('./temporal-contract').TemporalRequest;
     tier?: 'PROVIDER_READBACK' | 'UI_LIST_READBACK' | 'UI_RUNNING_READBACK'; label?: string;
     beforeRows?: import('./temporal-ui').AlarmUiRow[]; afterRows?: import('./temporal-ui').AlarmUiRow[]; remaining?: number[];

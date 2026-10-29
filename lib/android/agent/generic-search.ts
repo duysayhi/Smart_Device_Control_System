@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import type { Observation } from '../state-observer';
+import { isNodeInteractable } from '../screen-state';
 import type { GoalNodeV2 } from './goal-graph';
 import type { GroundedCandidateV2 } from './grounded-candidates-v2';
 import { observedAffordances, type ObservedAffordance } from './ui-affordances';
@@ -9,19 +10,23 @@ import { isDescendant } from '../exploration/scroll-regions';
 import { emptyResultText, exactQuerySummary, resultSurface, type EvidenceAssessment } from './read-only-verifiers';
 import { isKeyboardVisibility, type KeyboardVisibility } from './keyboard-visibility';
 import { isGroundedCandidate } from './grounded-candidates-v2';
+import { browserResultDescriptor } from './browser-result-contract';
+import { verifyBrowserSearch } from '../action-verifier';
+import { hasFullscreenVideoSurface, observeYouTubeState, observedVideoAdSkip, observedVideoRecommendationDismiss, videoRecommendationOverlay } from './youtube-state';
+import { videoResultDescriptor } from './video-result-contract';
 
-export interface SearchScope { id: string; deviceId: string; executionId: string; sessionId: string; nodeId: string; packageName: string; query: string; createdAt: number }
-export interface SearchStep { phase: 'OPEN' | 'MENU' | 'DISMISS' | 'RESET' | 'FOCUS' | 'CLEAR' | 'ENTER' | 'SUBMIT'; target: ObservedAffordance; action: 'CLICK' | 'BACK' | 'SET_VALUE' | 'IME_SEARCH'; value?: string }
+export interface SearchScope { id: string; deviceId: string; executionId: string; sessionId: string; nodeId: string; packageName: string; query: string; createdAt: number; surface?: 'BROWSER_ORGANIC'; video?: true }
+export interface SearchStep { phase: 'OPEN' | 'MENU' | 'DISMISS' | 'RESET' | 'REVEAL' | 'CLOSE_MINI' | 'SKIP_AD' | 'DISMISS_RECOMMENDATION' | 'FOCUS' | 'CLEAR' | 'ENTER' | 'SUBMIT'; target: ObservedAffordance; action: 'CLICK' | 'BACK' | 'SET_VALUE' | 'IME_SEARCH'; value?: string }
 interface SearchRun { scope: SearchScope; signature: string; submittedAt?: number; beforeSubmit?: string; beforeResult?: string; attemptedSubmit: boolean; dismissed?: boolean; menuTried?: boolean;
   typedAt?: number; beforeTypeResult?: string; liveSnapshot?: string; liveSignature?: string; submission?: 'EXPLICIT_RPC' | 'LIVE_TRANSITION';
   editingBeforeSubmit?: boolean; outcomeSnapshot?: string; outcomeSignature?: string; outcomeWhy?: string; keyboard?: KeyboardVisibility;
-  replacementRequired?: boolean; clearedAt?: number; clearedResult?: string; provenField?: string; resetTried?: boolean }
+  replacementRequired?: boolean; clearedAt?: number; clearedResult?: string; provenField?: string; resetTried?: boolean; videoResets?: Set<string>; videoResetFrom?: string; revealed?: boolean; miniAttempted?: boolean; adAttempted?: boolean; recommendationAttempted?: boolean }
 const runs = new Map<string, SearchRun>();
 const activations = new WeakMap<GroundedCandidateV2, Observation>();
 const fieldIdentity = (row: ObservedAffordance) => JSON.stringify([row.packageName, row.resourceId, row.className, row.bounds]);
 export function isScopedSearchField(scopeId: string, row: ObservedAffordance): boolean {
   const run = runs.get(scopeId);
-  return isSearchField(row) || Boolean(run && active(run.scope) && run.provenField === fieldIdentity(row) && row.enabled && row.roles.includes('editable') && !row.sensitive && !row.destructive);
+  return isSearchField(row) || Boolean(run && active(run.scope) && (run.provenField === fieldIdentity(row) || run.scope.surface === 'BROWSER_ORGANIC' && browserAddress(row)) && row.enabled && row.roles.includes('editable') && !row.sensitive && !row.destructive);
 }
 export function noteSearchActivationAcknowledged(candidate: GroundedCandidateV2, before: Observation) {
   const run = candidate.search && runs.get(candidate.search.scopeId);
@@ -50,7 +55,9 @@ function resultSignature(snapshot: Observation, query?: string): string | undefi
   return content.length ? JSON.stringify(content.map(n => [n.resourceId, n.className, n.text, n.description, n.clickable])) : undefined;
 }
 const label = (row: ObservedAffordance) => foldIntent(row.label).replace(/[,\s]+(?:phim|button)\.?$/, '').trim();
-function collapsedSearch(row: ObservedAffordance): boolean {
+const browserAddress = (row: ObservedAffordance) => browserResultDescriptor.addressFields.test(row.resourceId.split('/').at(-1) ?? '');
+function collapsedSearch(row: ObservedAffordance, scope?: SearchScope): boolean {
+  if (scope?.surface === 'BROWSER_ORGANIC' && browserAddress(row) && row.roles.includes('clickable') && !row.roles.includes('editable')) return true;
   if (row.searchEntry && row.roles.includes('clickable') && !row.roles.includes('editable')) return true;
   return row.roles.includes('clickable') && !row.roles.includes('editable') && /TextView|SearchView/.test(row.className) &&
     /(?:^|[_-])search[_-](?:query|box|bar|text)(?:$|[_-])/.test(row.resourceId.split('/').at(-1) ?? '');
@@ -71,10 +78,12 @@ export function searchQuery(value: string): string {
   const trimmed = value.trim(), pairs: Record<string, string> = { '"': '"', "'": "'", '\u201c': '\u201d' };
   return pairs[trimmed[0]] && trimmed.at(-1) === pairs[trimmed[0]] ? trimmed.slice(1, -1) : trimmed;
 }
-export function beginSearch(node: GoalNodeV2, deviceId: string, executionId: string, sessionId: string): SearchScope {
+export function beginSearch(node: GoalNodeV2, deviceId: string, executionId: string, sessionId: string, surface?: 'BROWSER_ORGANIC', video = false): SearchScope {
   const query = searchQuery(node.outcome.value);
   if (node.capability !== 'SEARCH' || node.outcome.negated || !node.packageName || !query || query.length > 1000 || !sessionId) throw Error('Unsupported search scope.');
-  const scope = Object.freeze({ id: randomUUID(), deviceId, executionId, sessionId, nodeId: node.id, packageName: node.packageName, query, createdAt: Date.now() });
+  if (surface && !browserResultDescriptor.packages.includes(node.packageName)) throw Error('Unsupported browser search descriptor.');
+  if (video && !videoResultDescriptor.packages.includes(node.packageName)) throw Error('Unsupported video search descriptor.');
+  const scope = Object.freeze({ id: randomUUID(), deviceId, executionId, sessionId, nodeId: node.id, packageName: node.packageName, query, createdAt: Date.now(), ...(surface ? { surface } : {}), ...(video ? { video: true as const } : {}) });
   runs.set(scope.id, { scope, signature: JSON.stringify(scope), attemptedSubmit: false }); return scope;
 }
 function active(scope: SearchScope) {
@@ -91,6 +100,15 @@ export function searchSteps(scope: SearchScope, snapshot: Observation): SearchSt
   const observed = observedAffordances(snapshot, scope.executionId, scope.sessionId);
   if (observed.some(r => r.roles.includes('editable') && !isScopedSearchField(scope.id, r) && r.text.trim())) return [];
   const rows = observed.filter(r => r.enabled && !r.sensitive && !r.destructive);
+  const skip = scope.video && !run.adAttempted && observedVideoAdSkip(snapshot, rows);
+  if (skip) return [{ phase: 'SKIP_AD', action: 'CLICK', target: skip }];
+  const dismiss = scope.video && !run.recommendationAttempted && observedVideoRecommendationDismiss(snapshot, rows);
+  if (dismiss) return [{ phase: 'DISMISS_RECOMMENDATION', action: 'CLICK', target: dismiss }];
+  if (scope.video && !run.miniAttempted && observeYouTubeState(snapshot).miniPlayer) {
+    const close = rows.filter(r => r.roles.includes('clickable') && r.resourceId.endsWith(':id/modern_miniplayer_close') && /^(close mini ?player|dong trinh phat thu nho)$/.test(label(r)) &&
+      isNodeInteractable(snapshot.nodes[r.index], snapshot.nodes, snapshot.viewport, 'mini-player close', r.index));
+    if (close.length === 1) return [{ phase: 'CLOSE_MINI', action: 'CLICK', target: close[0] }];
+  }
   const searchEntries = rows.filter(r => r.roles.includes('clickable') && (searchLabel(label(r)) ||
     r.navigationIntent === 'SEARCH' && r.roles.includes('navigation') && r.selected !== true ||
     /(?:\$Tab|\.Tab)$/.test(r.className) && /^search\s+tab\b/.test(label(r))));
@@ -109,8 +127,17 @@ export function searchSteps(scope: SearchScope, snapshot: Observation): SearchSt
   }
   const open = searchEntries;
   if (open.length) return open.map(target => ({ phase: 'OPEN', action: 'CLICK', target }));
-  const collapsed = rows.filter(collapsedSearch);
+  const collapsed = rows.filter(row => collapsedSearch(row, scope));
   if (collapsed.length) return collapsed.map(target => ({ phase: 'OPEN', action: 'CLICK', target }));
+  if (scope.video && (run.videoResets?.size ?? 0) < 3) {
+    const state = observeYouTubeState(snapshot).state;
+    const allowed = ['VIDEO_PLAYER', 'VIDEO_PLAYER_PAUSED', 'FULLSCREEN_PLAYER', 'MINI_PLAYER', 'SHORTS_PLAYER'].includes(state);
+    const exits = rows.filter(r => r.roles.includes('clickable') && /^(back|navigate up|quay lai|tro ve|di chuyen len|dieu huong len|exit full screen|exit fullscreen|thoat toan man hinh|minimize|minimize video|thu nho|thu nho video)$/.test(label(r)));
+    if (allowed && !run.videoResets?.has(state) && exits.length === 1 && !observed.some(r => r.roles.includes('editable'))) return [{ phase: 'RESET', action: 'CLICK', target: exits[0] }];
+    const overlays = rows.filter(r => r.resourceId.endsWith(':id/player_overlays') && r.roles.includes('clickable') &&
+      !observed.some(child => child.index !== r.index && child.roles.includes('clickable') && isDescendant(snapshot.nodes, snapshot.nodes[child.index], snapshot.nodes[r.index])));
+    if (allowed && !run.revealed && !exits.length && overlays.length === 1) return [{ phase: 'REVEAL', action: 'CLICK', target: overlays[0] }];
+  }
   const unknownInputs = observed.filter(r => r.roles.includes('editable'));
   if (!run.resetTried && unknownInputs.length === 1 && unknownInputs[0].focused && unknownInputs[0].text === '' && !unknownInputs[0].sensitive && !unknownInputs[0].destructive) {
     const backs = rows.filter(r => r.roles.includes('clickable') && r.roles.includes('navigation') && /^(back|navigate up|quay lai|tro ve)$/.test(label(r)));
@@ -123,12 +150,17 @@ export function searchCandidateAllowed(candidate: GroundedCandidateV2, node: Goa
   return Boolean(run && active(run.scope) && !run.attemptedSubmit && node.capability === 'SEARCH' && node.id === run.scope.nodeId && node.packageName === run.scope.packageName &&
     searchQuery(node.outcome.value) === run.scope.query && candidate.deviceId === run.scope.deviceId && candidate.executionId === run.scope.executionId && candidate.sessionId === run.scope.sessionId &&
     step!.query === run.scope.query && (step!.phase === 'DISMISS' ? candidate.action === 'BACK' && !run.dismissed :
-      step!.phase === 'RESET' ? !run.resetTried && candidate.action === 'CLICK' && candidate.target.roles.includes('navigation') && /^(back|navigate up|quay lai|tro ve)$/.test(label(candidate.target)) :
+      step!.phase === 'DISMISS_RECOMMENDATION' ? run.scope.video && !run.recommendationAttempted && candidate.action === 'CLICK' && candidate.target.resourceId === run.scope.packageName + ':id/' + videoResultDescriptor.recommendation.cancel :
+      step!.phase === 'SKIP_AD' ? run.scope.video && !run.adAttempted && candidate.action === 'CLICK' && videoResultDescriptor.adSkipControlIds.some(id => candidate.target.resourceId === run.scope.packageName + ':id/' + id) :
+      step!.phase === 'CLOSE_MINI' ? run.scope.video && !run.miniAttempted && candidate.action === 'CLICK' && candidate.target.resourceId.endsWith(':id/modern_miniplayer_close') && /^(close mini ?player|dong trinh phat thu nho)$/.test(label(candidate.target)) :
+      step!.phase === 'REVEAL' ? run.scope.video && !run.revealed && candidate.action === 'CLICK' && candidate.target.resourceId.endsWith(':id/player_overlays') :
+      step!.phase === 'RESET' ? run.scope.video && candidate.action === 'CLICK' && /^(back|navigate up|quay lai|tro ve|di chuyen len|dieu huong len|exit full screen|exit fullscreen|thoat toan man hinh|minimize|minimize video|thu nho|thu nho video)$/.test(label(candidate.target)) ||
+        !run.resetTried && candidate.action === 'CLICK' && candidate.target.roles.includes('navigation') && /^(back|navigate up|quay lai|tro ve)$/.test(label(candidate.target)) :
       step!.phase === 'CLEAR' ? candidate.action === 'SET_VALUE' && candidate.value === '' && run.replacementRequired && !run.clearedAt && isScopedSearchField(run.scope.id, candidate.target) && candidate.target.focused :
       step!.phase === 'ENTER' ? candidate.action === 'SET_VALUE' && candidate.value === run.scope.query && isScopedSearchField(run.scope.id, candidate.target) && candidate.target.focused :
       step!.phase === 'FOCUS' ? candidate.action === 'CLICK' && isScopedSearchField(run.scope.id, candidate.target) && !candidate.target.focused :
       step!.phase === 'SUBMIT' ? candidate.action === 'CLICK' && searchLabel(label(candidate.target)) || candidate.action === 'IME_SEARCH' && isScopedSearchField(run.scope.id, candidate.target) && candidate.target.focused && candidate.target.text === run.scope.query :
-      candidate.action === 'CLICK' && (step!.phase === 'OPEN' ? collapsedSearch(candidate.target) || searchLabel(label(candidate.target)) || candidate.target.navigationIntent === 'SEARCH' && candidate.target.roles.includes('navigation') || /(?:\$Tab|\.Tab)$/.test(candidate.target.className) : /^(menu|open menu|more options|mo menu|tuy chon khac)$/.test(label(candidate.target)))));
+      candidate.action === 'CLICK' && (step!.phase === 'OPEN' ? collapsedSearch(candidate.target, run.scope) || searchLabel(label(candidate.target)) || candidate.target.navigationIntent === 'SEARCH' && candidate.target.roles.includes('navigation') || /(?:\$Tab|\.Tab)$/.test(candidate.target.className) : /^(menu|open menu|more options|mo menu|tuy chon khac)$/.test(label(candidate.target)))));
 }
 export function freshSearchTarget(candidate: GroundedCandidateV2, snapshot: Observation): ObservedAffordance | undefined {
   const run = candidate.search && runs.get(candidate.search.scopeId);
@@ -146,11 +178,24 @@ export function searchTransitionSatisfied(candidate: GroundedCandidateV2, snapsh
   const fields = observedAffordances(snapshot, run.scope.executionId, run.scope.sessionId).filter(r => isScopedSearchField(run.scope.id, r));
   if (candidate.search!.phase === 'OPEN') {
     if (fields.length === 1) return true;
-    const surfaces = observedAffordances(snapshot, run.scope.executionId, run.scope.sessionId).filter(r => collapsedSearch(r) && !r.sensitive && !r.destructive);
-    return fields.length === 0 && !collapsedSearch(candidate.target) && surfaces.length === 1;
+    const surfaces = observedAffordances(snapshot, run.scope.executionId, run.scope.sessionId).filter(r => collapsedSearch(r, run.scope) && !r.sensitive && !r.destructive);
+    return fields.length === 0 && !collapsedSearch(candidate.target, run.scope) && surfaces.length === 1;
   }
   if (candidate.search!.phase === 'MENU') return searchSteps(run.scope, snapshot).some(s => s.phase === 'OPEN');
-  if (candidate.search!.phase === 'RESET') return !observedAffordances(snapshot, run.scope.executionId, run.scope.sessionId).some(r => r.roles.includes('editable')) && searchSteps(run.scope, snapshot).some(s => s.phase === 'OPEN');
+  if (candidate.search!.phase === 'REVEAL') return searchSteps(run.scope, snapshot).some(s => ['OPEN', 'RESET'].includes(s.phase));
+  if (candidate.search!.phase === 'CLOSE_MINI') return !observeYouTubeState(snapshot).miniPlayer;
+  if (candidate.search!.phase === 'SKIP_AD') return !['AD_OVERLAY', 'UNKNOWN_SCREEN', 'APP_NOT_OPEN', 'POPUP_OR_DIALOG'].includes(observeYouTubeState(snapshot).state);
+  if (candidate.search!.phase === 'DISMISS_RECOMMENDATION') return !videoRecommendationOverlay(snapshot) && !['AD_OVERLAY', 'UNKNOWN_SCREEN', 'APP_NOT_OPEN', 'POPUP_OR_DIALOG'].includes(observeYouTubeState(snapshot).state);
+  if (candidate.search!.phase === 'RESET') {
+    if (observedAffordances(snapshot, run.scope.executionId, run.scope.sessionId).some(r => r.roles.includes('editable'))) return false;
+    if (searchSteps(run.scope, snapshot).some(s => s.phase === 'OPEN')) return true;
+    if (!run.scope.video || candidate.action !== 'CLICK' || !run.videoResetFrom) return false;
+    const state = observeYouTubeState(snapshot).state;
+    if (state === 'MINI_PLAYER' && run.videoResetFrom !== 'MINI_PLAYER') return true;
+    // A changed play/pause/buffering state does not prove that navigation happened.
+    return run.videoResetFrom === 'FULLSCREEN_PLAYER' && /^(exit full screen|exit fullscreen|thoat toan man hinh)$/.test(label(candidate.target)) &&
+      ['VIDEO_PLAYER', 'VIDEO_PLAYER_PAUSED'].includes(state) && !hasFullscreenVideoSurface(snapshot);
+  }
   if (candidate.search!.phase === 'DISMISS') return !benignPopup(snapshot) && snapshot.nodes.length > 0;
   if (candidate.search!.phase === 'FOCUS') return !candidate.target.focused && fields.length === 1 && fields[0].focused;
   if (candidate.search!.phase === 'ENTER') return fields.length === 1 && fields[0].text === run.scope.query;
@@ -162,11 +207,29 @@ export function noteSearchNavigation(candidate: GroundedCandidateV2) {
   if (!run || !active(run.scope)) throw Error('Search scope is no longer active.');
   if (candidate.search!.phase === 'DISMISS') run.dismissed = true;
   if (candidate.search!.phase === 'MENU') run.menuTried = true;
-  if (candidate.search!.phase === 'RESET') run.resetTried = true;
+  if (candidate.search!.phase === 'REVEAL') run.revealed = true;
+  if (candidate.search!.phase === 'RESET' && candidate.action !== 'BACK') run.resetTried = true;
 }
 export function beforeSearchDispatch(candidate: GroundedCandidateV2, snapshot: Observation) {
   const step = candidate.search, run = step && runs.get(step.scopeId);
   if (!run || !bound(run.scope, snapshot) || run.attemptedSubmit) throw Error('Search scope is expired, foreign or already submitted.');
+  if (step!.phase === 'CLOSE_MINI') {
+    if (!freshSearchTarget(candidate, snapshot)) throw Error('VIDEO_MINIPLAYER_CLOSE_UNGROUNDED');
+    run.miniAttempted = true;
+  }
+  if (step!.phase === 'SKIP_AD') {
+    if (!freshSearchTarget(candidate, snapshot) || run.adAttempted) throw Error('VIDEO_AD_SKIP_UNGROUNDED_OR_REPLAYED');
+    run.adAttempted = true;
+  }
+  if (step!.phase === 'DISMISS_RECOMMENDATION') {
+    if (!freshSearchTarget(candidate, snapshot) || run.recommendationAttempted) throw Error('VIDEO_RECOMMENDATION_DISMISS_UNGROUNDED_OR_REPLAYED');
+    run.recommendationAttempted = true;
+  }
+  if (step!.phase === 'RESET' && run.scope.video && ['VIDEO_PLAYER', 'VIDEO_PLAYER_PAUSED', 'FULLSCREEN_PLAYER', 'MINI_PLAYER', 'SHORTS_PLAYER'].includes(observeYouTubeState(snapshot).state)) {
+    if (!freshSearchTarget(candidate, snapshot)) throw Error('VIDEO_SEARCH_EXIT_UNGROUNDED');
+    const state = observeYouTubeState(snapshot).state;
+    run.videoResetFrom = state; run.videoResets ??= new Set(); run.videoResets.add(state);
+  }
   if (step!.phase === 'SUBMIT') {
     if (!run.typedAt) throw Error('Exact issued search entry has not been read back.');
     const fields = observedAffordances(snapshot, run.scope.executionId, run.scope.sessionId).filter(r => isScopedSearchField(run.scope.id, r));
@@ -206,6 +269,15 @@ export function observeLiveSearch(scope: SearchScope, snapshot: Observation): 'P
 export function searchResult(scope: SearchScope, snapshot: Observation): { query: string; status: 'RESULTS' | 'NO_RESULTS'; count: number; submission?: 'EXPLICIT_RPC' | 'LIVE_TRANSITION' } | undefined {
   const run = active(scope);
   if (!run?.submittedAt || !bound(scope, snapshot) || snapshot.timestamp < run.submittedAt || snapshot.snapshotId === run.beforeSubmit) return;
+  if (scope.surface === 'BROWSER_ORGANIC') {
+    run.outcomeWhy = 'BROWSER_QUERY_OR_ORGANIC_SURFACE_UNPROVEN';
+    if (snapshot.web?.status !== 'DOM_AVAILABLE' || !verifyBrowserSearch(snapshot, scope.query) || snapshot.web.document.readyState !== 'complete' ||
+      snapshot.nodes.some(n => n.displayed !== false && n.focused && /EditText|AutoCompleteTextView/.test(n.className))) return;
+    const signature = JSON.stringify([snapshot.web.document.url, snapshot.web.document.links.map(l => [l.url, l.title])]);
+    if (run.outcomeSignature !== signature) { run.outcomeSignature = signature; run.outcomeSnapshot = snapshot.snapshotId; return; }
+    if (run.outcomeSnapshot === snapshot.snapshotId) return;
+    return { query: scope.query, status: 'RESULTS', count: snapshot.web.document.links.length, submission: run.submission };
+  }
   run.outcomeWhy = 'QUERY_ECHO_MISSING_OR_AMBIGUOUS';
   const rows = observedAffordances(snapshot, scope.executionId, scope.sessionId);
   const echo = rows.filter(r => r.text === scope.query && (isScopedSearchField(scope.id, r) || /(?:search|query)/.test(r.resourceId.split('/').at(-1) ?? '')));

@@ -7,6 +7,7 @@ import { requestedToggle, requestedPhoto } from './state-target';
 import { requestedRecord } from './record-forms';
 import { foldIntent } from './outcome-spec';
 import { intentCapabilities } from './intent-capabilities';
+import { videoResultDescriptor } from './video-result-contract';
 
 // TypeScript's parser supplies the grammar; only a tiny numeric AST is evaluated.
 export function arithmeticOracle(expression: string): { expression: string; result: string } {
@@ -49,17 +50,23 @@ export function compileOutcomes(request: string | OutcomeSpecV2, deviceId: strin
     if (outcome.kind === 'INTENT' && (!outcome.intent || !intentCapabilities[outcome.intent.request.name].implemented)) reason = 'NOT_IMPLEMENTED: intent has no independently verified non-persisting executor.';
     if (['ALARM', 'TIMER'].includes(outcome.kind) && !outcome.temporal && !outcome.ambiguity.length) reason = 'UNSUPPORTED_OUTCOME: typed time contract missing.';
     if (outcome.kind === 'CALCULATE') { try { arithmeticOracle(outcome.value); } catch { reason = 'UNSUPPORTED_OUTCOME: arithmetic expression cannot be compiled.'; } }
+    if (outcome.kind === 'OPEN_RESULT' && (!outcome.browserResult || outcome.browserResult.ordinal !== 1 || index === 0 || original.outcomes[index - 1].kind !== 'SEARCH' || original.outcomes[index - 1].value !== outcome.browserResult.query)) reason = 'NEEDS_CLARIFICATION: BROWSER_RESULT_UNSUPPORTED: only first organic article after an exact search is supported.';
+    if (outcome.kind === 'SELECT_RESULT' && (!outcome.videoResult || outcome.videoResult.ordinal > videoResultDescriptor.maxOrdinal || ![1, 2].includes(index) ||
+      original.outcomes[index - 1].kind !== 'SEARCH' || original.outcomes[index - 1].value !== outcome.videoResult.query ||
+      !videoResultDescriptor.applications.includes(foldIntent(app ?? '')))) reason = 'UNSUPPORTED_OUTCOME: VIDEO_ORDINAL_OUTSIDE_PROVEN_RANGE';
     if (outcome.kind === 'SET_STATE' && !requestedToggle(outcome)) reason = 'UNSUPPORTED_OUTCOME: only explicit labeled boolean state has a registered verifier.';
     if (outcome.kind === 'CAPTURE_MEDIA' && !requestedPhoto(outcome)) reason = 'UNSUPPORTED_OUTCOME: only an explicitly requested single photo has a registered media verifier.';
     if (['CREATE_RECORD', 'SET_STRUCTURED_STATE'].includes(outcome.kind) && !requestedRecord(outcome)) reason = 'UNSUPPORTED_OUTCOME: no exact supported record/time schema and readback contract.';
     const mediaProducer = outcome.kind === 'FIND_ARTIFACT' ? original.outcomes.slice(0, index).findLast(row => row.kind === 'CAPTURE_MEDIA') : undefined;
     if (outcome.kind === 'FIND_ARTIFACT' && (!mediaProducer || !/^(?:anh|hinh|photo|image)\s+(?:vua chup|just captured)$/.test(foldIntent(outcome.value)))) reason = 'UNSUPPORTED_OUTCOME: exact media view requires a typed capture producer; generic Gallery UI search is not implemented.';
-    return { id: outcome.id, outcome, dependencies: [...new Set([...(index ? [original.outcomes[index - 1].id] : []), ...(mediaProducer ? [mediaProducer.id] : [])])], app,
+    return { id: outcome.id, outcome, dependencies: [...new Set([...(index ? [original.outcomes[index - 1].id] : []), ...(mediaProducer ? [mediaProducer.id] : [])])], app: outcome.intent?.request.name === 'READ_STATE' ? undefined : app,
       capability: outcome.kind, preconditions: ['fresh device observation', 'grounded scope', 'registered verification'],
       predicates: [...capability.predicates], inputs: mediaProducer ? [mediaProducer.id] : [],
       outputs: ['CREATE_RECORD', 'CAPTURE_MEDIA'].includes(outcome.kind) ? [outcome.id + ':artifact'] : [],
       status: reason ? 'SAFE_BLOCKED' as const : 'PENDING' as const, reason, evidenceIds: [] as string[] };
   });
-  return GoalGraphV2Schema.parse({ version: 2, id: randomUUID(), deviceId, executionId, original, nodes,
+  const expanded = nodes.flatMap(node => node.capability === 'SELECT_RESULT' && node.outcome.videoResult ? [node,
+    { ...node, id: node.id + ':playback', capability: 'VERIFY_PLAYBACK' as const, dependencies: [node.id], predicates: ['MEDIA_PLAYBACK_PROGRESS'], evidenceIds: [] }] : [node]);
+  return GoalGraphV2Schema.parse({ version: 2, id: randomUUID(), deviceId, executionId, original, nodes: expanded,
     coverage: nodes.some(node => node.reason?.startsWith('NEEDS_CLARIFICATION')) ? 'NEEDS_CLARIFICATION' : nodes.some(node => node.reason) ? 'UNSUPPORTED_OUTCOME' : 'COMPLETE' });
 }

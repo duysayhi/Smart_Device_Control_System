@@ -22,7 +22,7 @@ Module._load = function (name, parent, main) {
   };
   return load.call(this, name.startsWith('@/') ? path.resolve(__dirname, '..', name.slice(2)) : name, parent, main);
 };
-const { POST } = require('../app/api/executions/route.ts');
+const { handleLegacyExecution: POST } = require('../lib/android/unified-agent/legacy-execution-handler.ts');
 const { planWifiOff, planWifiOn, planWifiConnection } = require('../lib/android/wifi-plan.ts');
 const { issuePlanAuthorization } = require('../lib/android/action-plan-authorization.ts');
 const plan = planWifiOff('tắt wifi');
@@ -38,7 +38,7 @@ const request = (payload, origin = 'http://127.0.0.1:3000') => {
 });
 };
 
-test('enable confirmation is explicit, bound to ON and cannot authorize OFF', async () => {
+test('internal legacy handler: enable confirmation is explicit, bound to ON and cannot authorize OFF', async () => {
   const old = process.env.ANDROID_EXECUTOR_BACKEND; process.env.ANDROID_EXECUTOR_BACKEND = 'appium';
   const initialSessions = sessions;
   try {
@@ -51,7 +51,7 @@ test('enable confirmation is explicit, bound to ON and cannot authorize OFF', as
     assert.equal((await POST(request({ actionPlan: on, confirmationToken: challenge.confirmationToken }))).status, 409);
   } finally { if (old === undefined) delete process.env.ANDROID_EXECUTOR_BACKEND; else process.env.ANDROID_EXECUTOR_BACKEND = old; }
 });
-test('route never opens Session before confirmation; confirmed request runs once on the bound device', async () => {
+test('internal legacy handler never opens Session before confirmation; confirmed request runs once on the bound device', async () => {
   const old = process.env.ANDROID_EXECUTOR_BACKEND; process.env.ANDROID_EXECUTOR_BACKEND = 'appium';
   const baseSessions = sessions, baseActions = actions, baseClosed = closed;
   try {
@@ -67,7 +67,7 @@ test('route never opens Session before confirmation; confirmed request runs once
   } finally { if (old === undefined) delete process.env.ANDROID_EXECUTOR_BACKEND; else process.env.ANDROID_EXECUTOR_BACKEND = old; }
 });
 
-test('connection confirmation authorizes one exact SSID, not other networks or general input actions', async () => {
+test('internal legacy handler: connection confirmation authorizes one exact SSID, not other networks or general input actions', async () => {
   const old = process.env.ANDROID_EXECUTOR_BACKEND; process.env.ANDROID_EXECUTOR_BACKEND = 'appium';
   const baseSessions = sessions;
   try {
@@ -84,7 +84,7 @@ test('connection confirmation authorizes one exact SSID, not other networks or g
   } finally { if (old === undefined) delete process.env.ANDROID_EXECUTOR_BACKEND; else process.env.ANDROID_EXECUTOR_BACKEND = old; }
 });
 
-test('local development skips Wi-Fi confirmation without disabling same-origin enforcement', async () => {
+test('internal legacy handler: local development skips Wi-Fi confirmation without disabling same-origin enforcement', async () => {
   const previous = { mode: process.env.ANDROID_POLICY_MODE, env: process.env.NODE_ENV, backend: process.env.ANDROID_EXECUTOR_BACKEND };
   process.env.ANDROID_POLICY_MODE = 'development'; process.env.NODE_ENV = 'development'; process.env.ANDROID_EXECUTOR_BACKEND = 'appium';
   const baseSessions = sessions;

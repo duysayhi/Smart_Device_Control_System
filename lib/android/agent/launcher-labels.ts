@@ -15,8 +15,13 @@ export function launcherLabelsFromBadging(text: string, packageName: string, com
   const activity = text.split(/\r?\n/).find(l => l.startsWith('launchable-activity:'));
   const name = activity?.match(/\bname='([^']+)'/)?.[1], label = activity?.match(/\blabel='([^']*)'/)?.[1];
   if (!component.startsWith(packageName + '/')) return [];
-  if (name && packageName + '/' + name === component.replace('/.', '/' + packageName + '.') && label && validLabel(label)) return [label];
-  return [...new Set([...text.matchAll(/^application-label(?:-[^:]+)?:'([^'\r\n]+)'$/gm)].map(m => m[1]).filter(validLabel))];
+  const labels = [...new Set([...text.matchAll(/^application-label(?:-[^:]+)?:'([^'\r\n]+)'$/gm)].map(m => m[1]).filter(validLabel))];
+  if (name && packageName + '/' + name === component.replace('/.', '/' + packageName + '.') && label && validLabel(label)) {
+    const applicationLabel = /^application-label:'([^'\r\n]+)'$/m.exec(text)?.[1];
+    // Preserve activity-specific labels; translations apply only to a shared default label.
+    return applicationLabel === label ? [...new Set([label, ...labels])] : [label];
+  }
+  return labels;
 }
 async function aaptPath(): Promise<string | undefined> {
   const roots = [...new Set([process.env.ANDROID_HOME, process.env.ANDROID_SDK_ROOT, join(homedir(), 'AppData', 'Local', 'Android', 'Sdk')].filter((p): p is string => Boolean(p)))];

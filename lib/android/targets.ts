@@ -35,7 +35,8 @@ export function isSupportedTarget(target: string): boolean {
 
 export function parseUiHierarchy(xml: string): UiNode[] {
   if (XMLValidator.validate(xml) !== true) throw new Error('UIAutomator returned invalid XML.');
-  const root = new XMLParser({ ignoreAttributes: false, attributeNamePrefix: '', parseAttributeValue: false }).parse(xml);
+  // UiAutomator encodes emoji/newlines as numeric references; native selectors use the decoded label.
+  const root = new XMLParser({ ignoreAttributes: false, attributeNamePrefix: '', parseAttributeValue: false, htmlEntities: true }).parse(xml);
   if (!Object.hasOwn(root, 'hierarchy')) throw new Error('UIAutomator hierarchy is missing.');
   const nodes: UiNode[] = [];
   function visit(value: Record<string, unknown>, parentIndex?: number, parentEnabled = true) {

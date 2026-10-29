@@ -136,7 +136,7 @@ export class HybridContextObserver {
     } finally { if (switched) await this.restoreNative(); }
   }
   async clickOrdinal(observed: Extract<HybridObservation, { status: 'DOM_AVAILABLE' }>, ordinal: number,
-    timeoutMs: number, signal?: AbortSignal): Promise<{ title: string; selectedTitle: string; url: string; finalUrl: string }> {
+    timeoutMs: number, signal?: AbortSignal, beforeClick?: (destination: string) => void): Promise<{ title: string; selectedTitle: string; url: string; finalUrl: string }> {
     return withSessionContextLock(this.session, async () => {
       const started = performance.now(), remaining = () => Math.max(1, timeoutMs - (performance.now() - started));
       let switched = false;
@@ -168,6 +168,7 @@ export class HybridContextObserver {
         if (!await this.session.client.request<boolean>('GET', path + '/displayed', undefined, remaining(), signal) ||
           !await this.session.client.request<boolean>('GET', path + '/enabled', undefined, remaining(), signal)) throw new AndroidExecutionError('AMBIGUOUS', 'Web element is no longer enabled/visible.');
         checkCancellation(signal);
+        beforeClick?.(destination);
         await this.session.client.request('POST', path + '/click', {}, remaining(), signal);
         const expectedUrl = new URL(destination);
         let previousState = '', unchanged = 0;

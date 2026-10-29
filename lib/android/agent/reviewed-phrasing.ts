@@ -3,7 +3,15 @@ import type { PlanningApp } from './source-slots';
 import type { JsonReasoner } from './ollama';
 import type { AgentBudget } from './budget';
 import { assertSafeSource } from '../safety-envelope';
-import { foldIntent } from './outcome-spec';
+import { commandMask, foldIntent, type OutcomeSpecV2 } from './outcome-spec';
+import { enterSearchBoundary, politeWords } from './natural-phrasing';
+
+export function needsPhrasingReview(request: string, original: OutcomeSpecV2): boolean {
+  const first = original.outcomes[0], second = original.outcomes[1];
+  const gap = second ? commandMask(request).slice(first.span.end, second.span.start).trim() : undefined;
+  return Boolean(enterSearchBoundary(commandMask(request))) && gap !== undefined && ['', 'de', 'to'].includes(gap) ||
+    original.outcomes.some(o => new RegExp('^(?:' + politeWords + ')\\s+').test(foldIntent(o.span.text)));
+}
 
 export async function proposeReviewedPhrasing(request: string, apps: readonly PlanningApp[], reasoner: JsonReasoner, budget: AgentBudget, signal?: AbortSignal, forceModel = false): Promise<PrimitiveProposal> {
   assertSafeSource(request);

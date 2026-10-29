@@ -70,11 +70,11 @@ export function corroborateState(state: string, first: string, second: string): 
   let a: number | undefined, b: number | undefined;
   if (state === 'wifi') {
     if (!/^[01]$/.test(first.trim())) return;
-    const m = /\bWi-?Fi is (enabled|disabled)\b/i.exec(second); if (!m) return;
-    a = Number(first.trim()); b = m[1].toLowerCase() === 'enabled' ? 1 : 0;
+    const readings = [...second.matchAll(/\bWi-?Fi is (enabled|disabled)\b/gi)]; if (readings.length !== 1) return;
+    a = Number(first.trim()); b = readings[0][1].toLowerCase() === 'enabled' ? 1 : 0;
   } else if (state === 'battery') {
-    const m = /^\s*level:\s*(\d+)\s*$/m.exec(first); if (!m || !/^\d+$/.test(second.trim())) return;
-    a = Number(m[1]); b = Number(second.trim()); if (a > 100 || b > 100) return;
+    const readings = [...first.matchAll(/^\s*level:\s*(\d+)\s*$/gm)]; if (readings.length !== 1 || !/^\d+$/.test(second.trim())) return;
+    a = Number(readings[0][1]); b = Number(second.trim()); if (a > 100 || b > 100) return;
   } else if (state === 'brightness') {
     const readings = [...second.matchAll(/^\s*mScreenBrightness(?:Setting)?=(\d+(?:\.\d+)?)\s*$/gm)].map(m => m[1].includes('.') && Number(m[1]) <= 1 ? Math.round(Number(m[1]) * 255) : Number(m[1]));
     if (!readings.length || new Set(readings).size !== 1 || !/^\d+$/.test(first.trim())) return;
@@ -91,13 +91,14 @@ export function corroborateState(state: string, first: string, second: string): 
 }
 
 export async function executeIntentCapability(session: ManagedAppiumSession, observer: StateObserver, run: AdbRunner, approval: IntentApproval,
-  binding: IntentBinding, span: { start: number; end: number }, executionId: string, expectedPackage: string, signal?: AbortSignal, owner?: OwnerTestExecution): Promise<IntentEvidence> {
+  binding: IntentBinding, span: { start: number; end: number }, executionId: string, expectedPackage: string | undefined, signal?: AbortSignal, owner?: OwnerTestExecution): Promise<IntentEvidence> {
   return withSessionContextLock(session, async () => {
     const assert = () => { signal?.throwIfAborted(); assertIntentApproval(approval, session.serial, executionId, span, binding, Boolean(owner?.fullControl)); if (owner) assertOwnerTestExecution(owner, session.serial, approval.physicalId, executionId); };
     if (owner?.fullControl && fullControlHardBlock(approval.source)) throw Error('HARD_BLOCKED: excluded source cannot obtain an intent grant.');
     assert(); await session.ensureActive(signal);
-    const resolution = await resolveIntent(session.serial, binding.request, run);
-    if (resolution.packageName !== expectedPackage) throw Error('SAFE_BLOCKED: resolved handler changed before dispatch.');
+    const request = binding.request, sessionId = session.sessionId;
+    const resolution = request.name === 'READ_STATE' ? undefined : await resolveIntent(session.serial, request, run);
+    if (request.name !== 'READ_STATE' && (!expectedPackage || resolution?.packageName !== expectedPackage)) throw Error('SAFE_BLOCKED: resolved handler changed before dispatch.');
     const ready = await run(['-s', session.serial, 'shell', 'dumpsys', 'window', 'policy'], 5000);
     if (deviceReadiness(ready.stdout) !== 'READY') throw Error('SAFE_BLOCKED: device is locked or readiness unknown.');
     await session.assertPhysicalIdentity(signal);
@@ -108,22 +109,30 @@ export async function executeIntentCapability(session: ManagedAppiumSession, obs
       assert(); if (Date.now() > expiresAt) throw Error('SAFE_BLOCKED: intent grant expired; TTL unchanged.');
       ledger.add(key); return run(['-s', session.serial, 'shell', ...args], 10000);
     };
-    let proof: IntentEvidence;
-    const request = binding.request;
+    let proof: IntentEvidence, assertFreshRead: (() => void) | undefined;
     if (request.name === 'SET_DEVICE_STATE') {
       if (!owner?.fullControl) throw Error('SAFE_BLOCKED: explicit full-control mode required.');
       ledger.add(key);
       let controller = mutations.get(session);
-      if (!controller) { controller = new SettingMutationController(session, observer, run, owner, approval.source, executionId, expectedPackage); mutations.set(session, controller); }
+      if (!controller) { controller = new SettingMutationController(session, observer, run, owner, approval.source, executionId, expectedPackage!); mutations.set(session, controller); }
       const value = await controller.apply(request.args, signal);
       proof = { id: randomUUID(), name: request.name, deviceId: session.serial, executionId, sessionId: session.sessionId!, observedAt: controller.lastVerifiedAt, evidenceClass: 'INDEPENDENT_STATE_READBACK', value: String(value) };
     } else if (request.name === 'READ_STATE') {
+      assertFreshRead = () => {
+        assert();
+        if (!sessionId || session.sessionId !== sessionId) throw Error('SAFE_BLOCKED: READ_STATE requires the same owned Appium Session.');
+        if (Date.now() < expiresAt - 5000 || Date.now() > expiresAt) throw Error('SAFE_BLOCKED: independent state readback is stale.');
+      };
+      assertFreshRead();
       const [a, b] = stateReadCommands(request.args.state);
-      const first = await dispatch(a); assert(); const second = await run(['-s', session.serial, 'shell', ...b], 10000);
+      const first = await dispatch(a); assertFreshRead();
+      const second = await dispatch(b); assertFreshRead();
+      if (first.stderr?.trim() || second.stderr?.trim()) throw Error('SAFE_BLOCKED: independent state paths returned errors.');
       const value = corroborateState(request.args.state, first.stdout, second.stdout);
       if (value === undefined) throw Error('SAFE_BLOCKED: independent state paths unavailable or disagree.');
-      proof = { id: randomUUID(), name: request.name, deviceId: session.serial, executionId, sessionId: session.sessionId!, observedAt: Date.now(), evidenceClass: 'INDEPENDENT_STATE_READBACK', value };
+      proof = { id: randomUUID(), name: request.name, deviceId: session.serial, executionId, sessionId: sessionId!, observedAt: Date.now(), evidenceClass: 'INDEPENDENT_STATE_READBACK', value };
     } else {
+      if (!resolution) throw Error('SAFE_BLOCKED: intent handler is not bound.');
       await dispatch(['am', 'start', '-W', '-a', resolution.action, ...(resolution.data ? ['-d', quote(resolution.data)] : []), '-n', quote(resolution.component)]);
       const deadline = Date.now() + 12000; let snapshot: Observation | undefined;
       do {
@@ -135,7 +144,7 @@ export async function executeIntentCapability(session: ManagedAppiumSession, obs
       proof = { id: randomUUID(), name: request.name, deviceId: session.serial, executionId, sessionId: session.sessionId!, observedAt: snapshot.timestamp,
         snapshotId: snapshot.snapshotId, component: resolution.component, evidenceClass: 'INDEPENDENT_NATIVE_ACTIVITY_READBACK' };
     }
-    await session.assertPhysicalIdentity(signal); assert();
+    await session.assertPhysicalIdentity(signal); assertFreshRead?.(); assert();
     const sealed = Object.freeze(proof); proofs.set(sealed, JSON.stringify(sealed)); return sealed;
   });
 }

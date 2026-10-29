@@ -3,12 +3,17 @@ import { randomUUID } from 'node:crypto';
 import { workerRequest } from '@/lib/android/agent/worker-client';
 import { terminalTask, type DeviceTask } from '@/lib/android/agent/runtime-schema';
 import { isLocalMutation } from '@/lib/android/agent/request-origin';
+import { LEGACY_ENTRY_ENABLED, legacyEntryDenied } from '@/lib/android/unified-agent/legacy-entry';
+import { assertSafeSource } from '@/lib/android/safety-envelope';
 
 // Retain NDJSON compatibility. Viewer disconnects do not cancel device ownership.
 export async function POST(request: Request) {
   if (!isLocalMutation(request)) return Response.json({ error: 'Origin không hợp lệ.' }, { status: 403 });
   const input = z.object({ deviceId: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/), goal: z.string().trim().min(1).max(2000) }).strict().safeParse(await request.json().catch(() => null));
   if (!input.success) return Response.json({ error: 'Goal hoặc serial không hợp lệ.' }, { status: 400 });
+  try { assertSafeSource(input.data.goal); }
+  catch { return Response.json({ error: 'HARD_DENY: unsafe source; no execution authorized.' }, { status: 403 }); }
+  if (!LEGACY_ENTRY_ENABLED) return legacyEntryDenied();
   try {
     const created = await workerRequest('POST', { type: 'START', requestId: randomUUID(), jobs: [input.data] });
     if (!created.ok) return Response.json(await created.json(), { status: created.status });

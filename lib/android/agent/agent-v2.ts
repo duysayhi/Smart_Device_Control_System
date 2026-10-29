@@ -46,11 +46,9 @@ import { resolveIntent, isIntentEvidence, type IntentEvidence } from './intent-e
 import { registerReviewedOutcomes } from './outcome-spec';
 import { fullControlHardBlock } from './full-control-policy';
 import { chooseCompatible, compatibleReasoner } from './compatible-choice';
-import { issueCloudCommand } from './cloud-command';
+import { bindCommandSource } from './cloud-command';
 import { assertSafeSource } from '../safety-envelope';
-import { enterSearchBoundary, politeWords } from './natural-phrasing';
-import { commandMask, foldIntent } from './outcome-spec';
-import { proposeReviewedPhrasing } from './reviewed-phrasing';
+import { needsPhrasingReview, proposeReviewedPhrasing } from './reviewed-phrasing';
 import { decidePermission } from './permission-decision';
 import { LocalEffectJournal, journalAutoInterpretation } from './local-effect-journal';
 import { GroundedInteractionFailure, consumeNotSentReceipt } from '../grounded-interactions';
@@ -62,8 +60,20 @@ import { resolveTemporalHandler } from './temporal-executor';
 import { clarifyTemporal, clearTemporalClarification } from './temporal-clarification';
 import type { TemporalUiInventory, TemporalUiProof } from './temporal-ui';
 import { runTemporalUi } from './temporal-ui-runner';
+import type { PreparedV2 } from './prepared-v2';
+import { beginBrowserResult } from './browser-result';
+import { verifyBrowserResultOutcome } from './verification-registry';
+import type { VerifiedEvidence } from './evidence-predicates';
+import { beginVideoResult, createVideoPlaybackReader, type VideoResultScope, type VideoDiscoveryMemory, type VideoPlaybackReceipt } from './video-result';
+import { verifyVideoResultOutcome } from './verification-registry';
+import { videoPlaybackStatus, createPausedVideoIdentityReader } from './video-result';
+import { observeYouTubeState } from './youtube-state';
+import { videoWaitLimits } from './video-result-contract';
 
 export interface V2Execution {
+  discoveryMemory?(): VideoDiscoveryMemory;
+  videoPlaybackV2?(scope: VideoResultScope, snapshot: Observation, remainingMs: number, signal?: AbortSignal): Promise<VideoPlaybackReceipt | undefined>;
+  videoPausedIdentityV2?(scope: VideoResultScope, snapshot: Observation, remainingMs: number, signal?: AbortSignal): Promise<boolean>;
   temporalUiInventoryV2?(packageName: string, request: TemporalRequest, signal?: AbortSignal): Promise<TemporalUiInventory>;
   temporalCorroborateV2?(proof: TemporalUiProof, signal?: AbortSignal): Promise<TemporalUiProof>;
   temporalInventoryV2?(packageName: string, request: TemporalRequest, signal?: AbortSignal): Promise<TemporalInventory>;
@@ -71,7 +81,7 @@ export interface V2Execution {
   captureKeyV2?(grant: EffectGrant, permit: CameraFallbackPermit, signal?: AbortSignal): Promise<Observation>;
   launchDiscoveredV2?(app: DiscoveredApplication, signal?: AbortSignal): Promise<void>;
   settleV2?(success: boolean): Promise<V2Progress['mutations']>;
-  intentV2?(approval: IntentApproval, binding: IntentBinding, span: { start: number; end: number }, executionId: string, packageName: string, signal?: AbortSignal, owner?: OwnerTestExecution): Promise<IntentEvidence>;
+  intentV2?(approval: IntentApproval, binding: IntentBinding, span: { start: number; end: number }, executionId: string, packageName: string | undefined, signal?: AbortSignal, owner?: OwnerTestExecution): Promise<IntentEvidence>;
   backend: string; sessionId(): string | undefined; observe(signal?: AbortSignal): Promise<Observation>;
   execute(action: Action, signal?: AbortSignal): Promise<unknown>;
   interactV2(grant: EffectGrant, signal?: AbortSignal): Promise<Observation>; close(): Promise<void>;
@@ -98,7 +108,7 @@ export function androidV2Adapter(serial: string, budget: AgentBudget): V2Adapter
   };
   const catalog = new AppCatalog(serial, measuredAdb, undefined, { onTiming: row => budget.measure('CATALOG', (row.packageName ?? '*') + ':' + row.stage, row.elapsedMs) });
   const media = new MediaStoreReader(serial, measuredAdb);
-  return { catalog, async resolveTemporalApp(request, signal) { signal?.throwIfAborted(); const resolved = await resolveTemporalHandler(serial, request, measuredAdb); return (await catalog.resolve(resolved.packageName, 'LAUNCH', signal)).app; }, async resolveIntentApp(request, signal) { signal?.throwIfAborted(); const resolved = await resolveIntent(serial, request, measuredAdb); return (await catalog.resolve(resolved.packageName, 'LAUNCH', signal)).app; }, planningApps: signal => catalog.planningInventory(signal), keyboardVisibility: signal => readKeyboardVisibility(serial, measuredAdb, signal), persistedForms: true, media: { read: (id, cancel) => media.readCapture(id, cancel), readCapture: (id, cancel) => media.readCapture(id, cancel) }, async packageVersion(packageName, signal) {
+  return { catalog, async resolveTemporalApp(request, signal) { signal?.throwIfAborted(); const resolved = await resolveTemporalHandler(serial, request, measuredAdb); return (await catalog.resolve(resolved.packageName, 'LAUNCH', signal)).app; }, async resolveIntentApp(request, signal) { signal?.throwIfAborted(); if (request.name === 'READ_STATE') return; const resolved = await resolveIntent(serial, request, measuredAdb); return (await catalog.resolve(resolved.packageName, 'LAUNCH', signal)).app; }, planningApps: signal => catalog.planningInventory(signal), keyboardVisibility: signal => readKeyboardVisibility(serial, measuredAdb, signal), persistedForms: true, media: { read: (id, cancel) => media.readCapture(id, cancel), readCapture: (id, cancel) => media.readCapture(id, cancel) }, async packageVersion(packageName, signal) {
     if (!/^[A-Za-z][\w]*(?:\.[\w]+)+$/.test(packageName)) return;
     signal?.throwIfAborted();
     const { stdout } = await measuredAdb(['-s', serial, 'shell', 'dumpsys', 'package', packageName], 5000);
@@ -124,16 +134,15 @@ export function androidV2Adapter(serial: string, budget: AgentBudget): V2Adapter
       onRpc: value => { budget.measure('APPIUM', value.kind, value.elapsedMs); budget.profiling.rpcCount++; budget.profiling.rpcMs += value.elapsedMs; if (value.kind === 'SOURCE') budget.profiling.sourceRpcMs += value.elapsedMs; if (value.kind === 'ELEMENT') budget.profiling.elementRpcMs += value.elapsedMs; },
     });
     if (execution.backend !== 'appium') { await execution.close(); throw new Error('V2 requires Appium; backend fallback is not allowed.'); }
-    return execution;
+    return { ...execution, videoPlaybackV2: createVideoPlaybackReader(measuredAdb, serial), videoPausedIdentityV2: createPausedVideoIdentityReader(measuredAdb, serial) };
   } };
 }
 class SafeBlocked extends Error {}
 export async function runAgentV2(request: string, deviceId: string, executionId: string, physicalId: string, budget: AgentBudget,
-  adapter: V2Adapter, publish: (event: AgentProgress) => void, signal?: AbortSignal, reasoner: JsonReasoner = createStructuredReasoner(), ownerScope?: OwnerTestExecution): Promise<void> {
-  const provider = reasoner, commandRef = issueCloudCommand(request);
-  reasoner = { generate: (schema, system, input, b, cancel) => provider.generate(schema, system,
-    input && typeof input === 'object' ? { ...input, commandRef } : input, b, cancel) };
-  let graph = compileOutcomes(request, deviceId, executionId);
+  adapter: V2Adapter, publish: (event: AgentProgress) => void, signal?: AbortSignal, reasoner: JsonReasoner = createStructuredReasoner(), ownerScope?: OwnerTestExecution, prepared?: PreparedV2): Promise<void> {
+  reasoner = bindCommandSource(reasoner, request);
+  if (prepared && (prepared.graph.original.request !== request || prepared.graph.deviceId !== deviceId || prepared.graph.coverage !== 'COMPLETE')) throw Error('Prepared V2 plan binding mismatch.');
+  let graph = prepared ? { ...prepared.graph, executionId } : compileOutcomes(request, deviceId, executionId);
   const artifacts = new ArtifactStore(deviceId, physicalId, executionId), navigation = new NavigationGraph(deviceId);
   const planningStarted = performance.now(); let planningFinished = false;
   let execution: V2Execution | undefined, current: GoalNodeV2 | undefined, terminal: AgentProgress['status'] = 'BLOCKED';
@@ -150,6 +159,12 @@ export async function runAgentV2(request: string, deviceId: string, executionId:
   let unlockHelp = false;
   let search: V2Progress['search'];
   let temporal: V2Progress['temporal'];
+  let browserResult: V2Progress['browserResult'];
+  let videoResult: V2Progress['videoResult'];
+  let youtube: V2Progress['youtube'];
+  let videoDiscovery: V2Progress['videoDiscovery'];
+  const videoScopes = new Map<string, VideoResultScope>();
+  const searchProofs = new Map<string, VerifiedEvidence>();
   const localJournals = new Map<string, LocalEffectJournal>();
   const reflections: NonNullable<V2Progress['reflections']> = [];
   let intent: V2Progress['intent'], intentApproval: IntentApproval | undefined, mutations: V2Progress['mutations'];
@@ -159,7 +174,7 @@ export async function runAgentV2(request: string, deviceId: string, executionId:
     goalId: graph.id, description: request, subgoalId: current?.id, subgoal: current?.outcome.span.text, reason: message.slice(0, 180),
     verifiedSubgoals: graph.nodes.filter(row => row.status === 'VERIFIED').length, totalSubgoals: graph.nodes.length,
     screen: latestSnapshot?.screen, foregroundPackage: latestSnapshot?.foregroundPackage, currentScreen: latestSnapshot && understandCurrentScreen(latestSnapshot, executionId), ...budget.summary(),
-    v2: { temporal, version: 2, graph: structuredClone(graph), discovery: discoveryPlan(graph, world), uiUnderstanding: world && { snapshotId: world.snapshotId, state: world.state, widgets: world.widgets.length, groups: world.groups.length, unknown: world.widgets.filter(w => w.roles.includes('unknown')).length }, sessionId: ownedSessionId, analysis, search, ownerAuthorizationId: ownerScope?.id, currentNode: current?.id, capability: current?.capability, coverage, assistance, artifactIds: artifacts.ids(),
+    v2: { videoDiscovery, youtube, videoResult, browserResult, temporal, version: 2, graph: structuredClone(graph), discovery: discoveryPlan(graph, world), uiUnderstanding: world && { snapshotId: world.snapshotId, state: world.state, widgets: world.widgets.length, groups: world.groups.length, unknown: world.widgets.filter(w => w.roles.includes('unknown')).length }, sessionId: ownedSessionId, analysis, search, ownerAuthorizationId: ownerScope?.id, currentNode: current?.id, capability: current?.capability, coverage, assistance, artifactIds: artifacts.ids(),
       localEffects: [...localJournals.values()].flatMap(j => j.records), reflections, mutations, intent, interaction, artifactResolution, completion: allOutcomesVerified(graph) ? 'ALL_VERIFIED' : graph.nodes.some(row => row.status === 'VERIFIED') ? 'PARTIAL' : 'NONE', artifacts: artifacts.summaries(), availableAffordances: latestSnapshot ? [...new Set(observedAffordances(latestSnapshot, executionId, execution?.sessionId() ?? '').flatMap(row => row.roles))] : [], navigationTransitions: navigation.hints().length } });
   const help = async (category: NonNullable<V2Progress['assistance']>['category'], choices: { id: string; label: string }[], message: string, plan?: import('./outcome-spec').OutcomeSpecV2) => {
     if (category === 'GOAL_INTERPRETATION' && ownerScope && choices.length === 1 && decidePermission({ source: request, stage: 'INTERPRETATION', owner: ownerScope, deviceId, physicalId, executionId, plan }).decision === 'ALLOW') {
@@ -190,9 +205,17 @@ export async function runAgentV2(request: string, deviceId: string, executionId:
     await ensureReady();
     // A just-returned post-action native observation can serve the next selection
     // epoch once; dispatch still independently re-observes before any effect.
-    const snapshot = carry && Date.now() - carry.timestamp >= 0 && Date.now() - carry.timestamp <= 1000 ? carry : await execution!.observe(signal);
+    // Video controls may auto-hide during a redundant source RPC. Reuse this
+    // owned post-action observation once within the existing 5s observation
+    // contract; effect dispatch still takes a separate fresh native snapshot.
+    const carryLimit = graph.nodes.some(n => n.outcome.videoResult) ? 5000 : 1000;
+    const snapshot = carry && Date.now() - carry.timestamp >= 0 && Date.now() - carry.timestamp <= carryLimit ? carry : await execution!.observe(signal);
     if (snapshot.deviceSerial !== deviceId || snapshot.observationStatus !== 'OBSERVED' || Date.now() - snapshot.timestamp > 5000 || Date.now() < snapshot.timestamp) throw new SafeBlocked('Fresh observed state for this device is unavailable.');
-    latestSnapshot = snapshot; world = understandUiWorld(snapshot, executionId, execution!.sessionId()!); return snapshot;
+    latestSnapshot = snapshot; world = understandUiWorld(snapshot, executionId, execution!.sessionId()!);
+    if (graph.nodes.some(n => n.outcome.videoResult)) youtube = { ...youtube, ...videoWaitLimits(), state: observeYouTubeState(snapshot).state,
+      snapshotId: snapshot.snapshotId, controls: snapshot.foregroundPackage === 'com.google.android.youtube' ? observedAffordances(snapshot, executionId, execution!.sessionId()!).filter(a => a.roles.includes('clickable') && !a.sensitive && !a.destructive &&
+        /search|tim kiem|back|quay|thu nho|minimize|full.?screen|toan man hinh|player_overlays|skip|bo qua|^play$|^phat/.test((a.label + ' ' + a.resourceId).normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase())).slice(0, 16).map(a => ({ label: a.label.slice(0, 120), resourceId: a.resourceId })) : [] };
+    return snapshot;
   };
   const ensureReady = async () => {
     if (ownerScope) assertOwnerTestExecution(ownerScope, deviceId, physicalId, executionId);
@@ -215,6 +238,10 @@ export async function runAgentV2(request: string, deviceId: string, executionId:
     if (ownerScope?.fullControl && fullControlHardBlock(request)) throw new SafeBlocked('HARD_BLOCKED: excluded destructive/security operation; no device effect.');
     if (ownerScope && destructiveTestIntent(request)) throw new SafeBlocked('OWNER_TEST_DESTRUCTIVE_INTENT: no action authorized.');
     try { assertSafeSource(request); } catch (error) { throw new SafeBlocked(error instanceof Error ? error.message : 'HARD_BLOCKED: unsafe source.'); }
+    if (prepared?.review) {
+      await help('GOAL_INTERPRETATION', [{ id: 'accept', label: prepared.summary }], 'Review the prepared source-bound interpretation before any effect.', graph.original);
+      analysis.source = 'MODEL_REVIEWED';
+    }
     const proposedIntents = adapter.resolveIntentApp ? proposeIntentOutcomes(request) : undefined;
     if (proposedIntents) {
       const summary = proposedIntents.outcomes.map(o => o.intent!.request.name + ': ' + Object.values(o.intent!.request.args).join(' | ')).join('; ');
@@ -228,11 +255,10 @@ export async function runAgentV2(request: string, deviceId: string, executionId:
       budget.runtimeIdentity = { executionId, deviceId, physicalId };
       if (destructiveTestIntent(request)) throw new SafeBlocked('OWNER_TEST_DESTRUCTIVE_INTENT: no action authorized.');
     }
-    const first = graph.original.outcomes[0], second = graph.original.outcomes[1];
-    const gap = second ? commandMask(request).slice(first.span.end, second.span.start).trim() : undefined;
-    const natural = Boolean(enterSearchBoundary(commandMask(request))) && gap !== undefined && ['', 'de', 'to'].includes(gap) ||
-      graph.original.outcomes.some(o => new RegExp('^(?:' + politeWords + ')\\s+').test(foldIntent(o.span.text)));
-    if (!proposedIntents && natural && graph.coverage === 'COMPLETE' && !graph.nodes.some(node => node.outcome.temporal)) {
+    if (graph.nodes.some(node => node.outcome.intent?.request.name === 'READ_STATE')) budget.runtimeIdentity = { executionId, deviceId, physicalId };
+    const natural = needsPhrasingReview(request, graph.original);
+    const hasReadState = graph.nodes.some(node => node.outcome.intent?.request.name === 'READ_STATE');
+    if (!prepared && !proposedIntents && !hasReadState && natural && graph.coverage === 'COMPLETE' && !graph.nodes.some(node => node.outcome.temporal)) {
       let p;
       try { p = adapter.planningApps
         ? await proposeReviewedPhrasing(request, await adapter.planningApps(signal), reasoner, budget, signal)
@@ -241,7 +267,7 @@ export async function runAgentV2(request: string, deviceId: string, executionId:
       await help('GOAL_INTERPRETATION', [{ id: 'accept', label: p.summary }], 'Review the complete source-bound application launch and exact query before any effect.');
       graph = bindReviewedPrimitives(p, deviceId, executionId);
     }
-    if (graph.coverage !== 'COMPLETE' && graph.original.outcomes.some(row => row.kind === 'UNKNOWN') && graph.original.outcomes.every(row => !row.negated)) {
+    if (!prepared && !hasReadState && graph.coverage !== 'COMPLETE' && graph.original.outcomes.some(row => row.kind === 'UNKNOWN') && graph.original.outcomes.every(row => !row.negated)) {
       emit('PLANNING', 'Request has unsupported phrasing; select source-bound semantic interpretations for review.');
       let proposal;
       const decompose = async () => {
@@ -281,6 +307,7 @@ export async function runAgentV2(request: string, deviceId: string, executionId:
     const apps = new Map<string, DiscoveredApplication>();
     for (const node of graph.nodes) {
       current = node;
+      if (node.outcome.intent?.request.name === 'READ_STATE') { node.packageName = undefined; continue; }
       emit('PLANNING', 'Compile requested outcomes and discover a verified per-device application.');
       const key = node.outcome.intent ? JSON.stringify(node.outcome.intent.request) : node.app ?? node.capability;
       if (!apps.has(key)) {
@@ -314,7 +341,7 @@ export async function runAgentV2(request: string, deviceId: string, executionId:
         intentApproval ??= approveIntentSource(request, deviceId, executionId, physicalId);
         budget.consume('steps'); await ensureReady(); const started = performance.now();
         let proof: IntentEvidence;
-        try { proof = await execution.intentV2(intentApproval, binding, current.outcome.span, executionId, current.packageName!, signal, ownerScope); }
+        try { proof = await execution.intentV2(intentApproval, binding, current.outcome.span, executionId, current.packageName, signal, ownerScope); }
         catch (error) { throw new SafeBlocked(error instanceof Error ? error.message : 'Intent outcome uncertain; no replay.'); }
         finally { budget.timings.executionMs += performance.now() - started; }
         if (!isIntentEvidence(proof) || proof.deviceId !== deviceId || proof.executionId !== executionId || proof.sessionId !== execution.sessionId() || proof.name !== binding.request.name || Date.now() - proof.observedAt < 0 || Date.now() - proof.observedAt > 5000) throw new SafeBlocked('Foreign, stale or unissued intent evidence.');
@@ -403,6 +430,8 @@ export async function runAgentV2(request: string, deviceId: string, executionId:
         }
         if (current.capability === 'SEARCH') {
           const proof = await runGenericSearch({ node: current, deviceId, executionId, execution, budget, signal, ownerScope, fresh,
+            videoSearch: graph.nodes.some(n => n.capability === 'SELECT_RESULT' && n.dependencies.includes(current!.id)),
+            surface: graph.nodes.some(n => n.capability === 'OPEN_RESULT' && n.dependencies.includes(current!.id)) ? 'BROWSER_ORGANIC' : undefined,
             keyboard: adapter.keyboardVisibility ? () => adapter.keyboardVisibility!(signal) : undefined,
               userAction: async action => { await help('USER_ACTION', [{ id: 'continue', label: 'I handled the screen manually; observe again' }], 'NEEDS_USER_ACTION: ' + action.reason + '. No consent or settings action is authorized.'); },
             choose: async candidates => {
@@ -415,8 +444,140 @@ export async function runAgentV2(request: string, deviceId: string, executionId:
               return decision.choice === 'ABSTAIN' ? help('TARGET_SELECTION', candidates.map(c => ({ id: c.id, label: c.description })), 'Search targets require disambiguation.') : decision.choice;
             }, progress: (state, candidate) => { search = state; if (candidate) interaction = { candidateId: candidate.id, snapshotId: candidate.snapshotId, action: candidate.action, targetRef: candidate.target.elementId }; emit(candidate ? 'EXECUTING' : 'VERIFYING', `SEARCH: ${state.phase}${state.status ? ' ' + state.status : ''}`); } });
           current.status = 'VERIFIED'; current.evidenceIds.push(proof.id);
+          searchProofs.set(current.id, proof);
           current.outputs = [artifacts.put(proof, graph.nodes.filter(row => row.dependencies.includes(current!.id)).map(row => row.id)).id];
           emit('VERIFYING', 'Submitted search and independent query/result state verified; no result opened.'); nodeDone = true; continue;
+        }
+        if (current.capability === 'SELECT_RESULT') {
+          const parent = graph.nodes.find(n => current!.dependencies.includes(n.id) && n.capability === 'SEARCH' && n.status === 'VERIFIED' && n.packageName === current!.packageName);
+          const searchProof = parent && searchProofs.get(parent.id);
+          if (!searchProof || searchProof.search?.status !== 'RESULTS') throw new SafeBlocked('VIDEO_SEARCH_RESULTS_REQUIRED');
+          if (!execution.discoveryMemory || !execution.videoPlaybackV2) throw new SafeBlocked('VIDEO_DISCOVERY_OR_PLAYBACK_READER_MISSING');
+          let scope: VideoResultScope;
+          try {
+            // Shared read-only bounded discovery primitive, never a legacy engine
+            // or CLICK action. It proves origin/overlap before exposing an ordinal.
+            budget.consume('steps');
+            await execution.execute({ type: 'WAIT_FOR', target: 'video_card_' + current.outcome.videoResult!.ordinal, timeoutMs: Math.min(videoWaitLimits().discoveryMs, budget.remaining()) }, signal);
+            snapshot = await fresh();
+            if (execution.sessionId() !== ownedSessionId) throw Error('VIDEO_SESSION_CHANGED');
+            scope = beginVideoResult(current, snapshot, searchProof, ownedSessionId!, execution.discoveryMemory());
+            videoDiscovery = { ...execution.discoveryMemory(), query: scope.query, ordinal: scope.ordinal, physicalId, snapshotId: snapshot.snapshotId, searchEvidenceId: searchProof.id };
+          } catch (error) { signal?.throwIfAborted(); throw new SafeBlocked(error instanceof Error ? error.message : 'VIDEO_DISCOVERY_UNPROVEN'); }
+          const manifest = generateGroundedCandidates(current, snapshot, executionId, ownedSessionId!, false, 0, '', false, undefined, Boolean(ownerScope), undefined, undefined, undefined, scope);
+          if (manifest.candidates.length !== 1) throw new SafeBlocked('VIDEO_ORDINAL_TARGET_UNPROVEN');
+          let candidate = manifest.candidates[0], after: Observation | undefined;
+          budget.profiling.singletonCandidatesSkipped++;
+          for (let admission = 0; admission < 2; admission++) {
+            budget.consume('steps');
+            interaction = { candidateId: candidate.id, snapshotId: candidate.snapshotId, action: candidate.action, targetRef: candidate.target.elementId };
+            emit('EXECUTING', `SELECT_RESULT ${scope.ordinal}: backend-grounded ordinary video; no replay.`);
+            const started = performance.now();
+            try { after = await execution.interactV2(issueEffectGrant(candidate, current, ownerScope), signal); break; }
+            catch (error) {
+              signal?.throwIfAborted();
+              if (admission === 0 && error instanceof GroundedInteractionFailure && consumeNotSentReceipt(error, candidate)) {
+                budget.consume('retries'); budget.consume('replans');
+                reflections.push({ nodeId: current.id, classification: error.classification, code: error.diagnosticCode, dispatch: error.dispatchState, retry: 1 });
+                emit('OBSERVING', 'VIDEO_SELECTION_NOT_SENT_REGROUND: authentic receipt consumed; one fresh candidate and new grant, never repeat an uncertain click.');
+                snapshot = await fresh();
+                if (execution.sessionId() !== scope.sessionId) throw new SafeBlocked('VIDEO_SESSION_CHANGED_NO_REPLAY');
+                const next = generateGroundedCandidates(current, snapshot, executionId, scope.sessionId, false, 0, '', false, undefined, Boolean(ownerScope), undefined, undefined, undefined, scope).candidates;
+                if (next.length !== 1 || next[0].videoResult?.phase) throw new SafeBlocked('VIDEO_NOT_SENT_REGROUND_UNPROVEN');
+                candidate = next[0]; continue;
+              }
+              throw new SafeBlocked('VIDEO_CLICK_UNVERIFIED_NO_REPLAY: ' + (error instanceof Error ? error.message : 'Unknown click outcome'));
+            } finally { budget.timings.executionMs += performance.now() - started; }
+          }
+          if (!after) throw new SafeBlocked('VIDEO_SELECTION_NOT_ACKNOWLEDGED');
+          if (execution.sessionId() !== ownedSessionId) throw new SafeBlocked('VIDEO_SESSION_CHANGED_NO_REPLAY');
+          const limits = videoWaitLimits(), until = Date.now() + Math.min(limits.waitMs, budget.remaining());
+          let proof: VerifiedEvidence | undefined, afterSkip: Observation | undefined;
+          for (let observation = 0; observation < limits.maxObservations; observation++) {
+            snapshot = await fresh(afterSkip ?? (observation === 0 ? after : undefined)); afterSkip = undefined;
+            if (execution.sessionId() !== ownedSessionId) throw new SafeBlocked('VIDEO_SESSION_CHANGED_NO_REPLAY');
+            youtube = { ...youtube, ...limits, state: observeYouTubeState(snapshot).state, playback: videoPlaybackStatus(scope, snapshot) };
+            proof = verifyVideoResultOutcome(scope, snapshot, { deviceId, executionId, nodeId: current.id, packageName: current.packageName! });
+            if (proof || Date.now() >= until || ['WRONG_VIDEO_OPENED', 'PLAYER_UNAVAILABLE'].includes(youtube.playback!)) break;
+            if (youtube.playback === 'AD_PLAYING') {
+              const skips = generateGroundedCandidates(current, snapshot, executionId, ownedSessionId!, false, 0, '', false, undefined, Boolean(ownerScope), undefined, undefined, undefined, scope).candidates.filter(c => c.videoResult?.phase === 'SKIP_AD');
+              if (skips.length === 1) {
+                budget.consume('steps'); const skip = skips[0], started = performance.now();
+                interaction = { candidateId: skip.id, snapshotId: skip.snapshotId, action: 'SKIP_AD_CLICK', targetRef: skip.target.elementId };
+                emit('EXECUTING', 'VIDEO_SKIP_AD: one observed native skip control; no advertiser link or replay.');
+                try { afterSkip = await execution.interactV2(issueEffectGrant(skip, current, ownerScope), signal); }
+                catch (error) { signal?.throwIfAborted(); throw new SafeBlocked('VIDEO_AD_SKIP_UNVERIFIED_NO_REPLAY: ' + (error instanceof GroundedInteractionFailure ? error.dispatchState + ':' + error.diagnosticCode : 'UNKNOWN')); }
+                finally { budget.timings.executionMs += performance.now() - started; }
+                continue;
+              }
+            }
+            emit('VERIFYING', 'SELECT_RESULT readback: ' + youtube.playback);
+            await delay(limits.intervalMs, undefined, { signal });
+          }
+          if (!proof?.videoResult) throw new SafeBlocked('VIDEO_DESTINATION_UNVERIFIED_NO_REPLAY: ' + youtube?.playback);
+          current.status = 'VERIFIED'; current.evidenceIds.push(proof.id); videoScopes.set(current.id, scope);
+          videoResult = { ...proof.videoResult, selectionEvidenceId: proof.id };
+          emit('VERIFYING', 'Selected video UI identity verified; playback remains pending.'); nodeDone = true; continue;
+        }
+        if (current.capability === 'VERIFY_PLAYBACK') {
+          const scope = videoScopes.get(current.outcome.id);
+          if (!scope || !execution.videoPlaybackV2 || execution.sessionId() !== scope.sessionId) throw new SafeBlocked('VIDEO_PLAYBACK_SCOPE_MISSING');
+          const started = performance.now(); let proof: VerifiedEvidence | undefined;
+          try {
+            // Observation-only bounded sampling; never repeats selection/click.
+            const limits = videoWaitLimits(), until = Date.now() + Math.min(limits.waitMs, budget.remaining());
+            for (let sample = 0; sample < limits.maxObservations && !proof && Date.now() < until; sample++) {
+              snapshot = await fresh();
+              youtube = { ...youtube, ...limits, state: observeYouTubeState(snapshot).state, playback: videoPlaybackStatus(scope, snapshot) };
+              if (execution.sessionId() !== scope.sessionId) throw new SafeBlocked('VIDEO_SESSION_CHANGED_NO_REPLAY');
+              if (youtube.playback === 'CORRECT_VIDEO_PAUSED' || youtube.playback === 'AD_PLAYING') {
+                if (youtube.playback === 'CORRECT_VIDEO_PAUSED') await execution.videoPausedIdentityV2?.(scope, snapshot, Math.min(3000, budget.remaining()), signal);
+                const candidates = generateGroundedCandidates(current, snapshot, executionId, scope.sessionId, false, 0, '', false, undefined, Boolean(ownerScope), undefined, undefined, undefined, scope).candidates;
+                if (candidates.length === 1) {
+                  budget.consume('steps'); const started = performance.now();
+                  const skip = candidates[0].videoResult?.phase === 'SKIP_AD';
+                  interaction = { candidateId: candidates[0].id, snapshotId: candidates[0].snapshotId, action: skip ? 'SKIP_AD_CLICK' : 'RESUME_PLAY_CLICK', targetRef: candidates[0].target.elementId };
+                  emit('EXECUTING', skip ? 'VIDEO_SKIP_AD: one observed native skip control; no advertiser link or replay.' : 'VIDEO_RESUME_PLAY: independently identified paused target; one native Play.');
+                  try { await execution.interactV2(issueEffectGrant(candidates[0], current, ownerScope), signal); }
+                  catch (error) { signal?.throwIfAborted(); throw new SafeBlocked((skip ? 'VIDEO_AD_SKIP_UNVERIFIED_NO_REPLAY: ' : 'VIDEO_PLAY_UNKNOWN_NO_REPLAY: ') + (error instanceof Error ? error.message : 'No acknowledgement')); }
+                  finally { budget.timings.executionMs += performance.now() - started; }
+                  continue;
+                }
+              }
+              const receipt = await execution.videoPlaybackV2(scope, snapshot, Math.min(5000, budget.remaining()), signal);
+              if (receipt) proof = verifyVideoResultOutcome(scope, receipt.snapshot, { deviceId, executionId, nodeId: current.id, packageName: current.packageName! }, receipt);
+              if (!proof) await delay(limits.intervalMs, undefined, { signal });
+            }
+          } finally { budget.timings.verificationMs += performance.now() - started; }
+          if (!proof?.videoResult || !videoResult) throw new SafeBlocked('VIDEO_PLAYBACK_PROGRESS_UNVERIFIED_NO_REPLAY: ' + youtube?.playback);
+          if (youtube) youtube.playback = 'CORRECT_VIDEO_PLAYING';
+          current.status = 'VERIFIED'; current.evidenceIds.push(proof.id);
+          videoResult = { ...videoResult, ...proof.videoResult, playbackEvidenceId: proof.id };
+          emit('VERIFYING', 'Exact selected video and two fresh advancing MediaSession readings verified.'); nodeDone = true; continue;
+        }
+        if (current.capability === 'OPEN_RESULT') {
+          const parent = graph.nodes.find(n => current!.dependencies.includes(n.id) && n.capability === 'SEARCH' && n.status === 'VERIFIED' && n.packageName === current!.packageName);
+          const searchProof = parent && searchProofs.get(parent.id);
+          if (!searchProof) throw new SafeBlocked('BROWSER_RESULT_SEARCH_EVIDENCE_MISSING');
+          let scope;
+          try { scope = beginBrowserResult(current, snapshot, searchProof, execution.sessionId()!); }
+          catch (error) { throw new SafeBlocked(error instanceof Error ? error.message : 'BROWSER_RESULT_SCOPE_UNPROVEN'); }
+          const manifest = generateGroundedCandidates(current, snapshot, executionId, execution.sessionId()!, false, 0, '', false, undefined, Boolean(ownerScope), undefined, undefined, scope);
+          if (manifest.candidates.length !== 1) throw new SafeBlocked('BROWSER_RESULT_ORGANIC_TARGET_UNPROVEN');
+          const candidate = manifest.candidates[0];
+          budget.profiling.singletonCandidatesSkipped++; budget.consume('steps');
+          interaction = { candidateId: candidate.id, snapshotId: candidate.snapshotId, action: candidate.action, targetRef: candidate.target.elementId };
+          emit('EXECUTING', 'Open one backend-grounded first organic article; no ordinal fallback or replay.');
+          let after: Observation; const started = performance.now();
+          try { after = await execution.interactV2(issueEffectGrant(candidate, current, ownerScope), signal); }
+          catch (error) { signal?.throwIfAborted(); throw new SafeBlocked('BROWSER_RESULT_UNVERIFIED_NO_REPLAY: ' + (error instanceof Error ? error.message : 'Unknown click outcome')); }
+          finally { budget.timings.executionMs += performance.now() - started; }
+          const proof = verifyBrowserResultOutcome(scope, await fresh(after), { deviceId, executionId, nodeId: current.id, packageName: current.packageName! });
+          if (!proof?.browserResult) throw new SafeBlocked('BROWSER_RESULT_DESTINATION_UNVERIFIED_NO_REPLAY');
+          current.status = 'VERIFIED'; current.evidenceIds.push(proof.id);
+          browserResult = { ...proof.browserResult, evidenceId: proof.id };
+          emit('VERIFYING', 'Prior exact search, organic identity and loaded destination URL/title independently verified.');
+          nodeDone = true; continue;
         }
         if (current.capability === 'FIND_ARTIFACT') {
           const media = current.inputs.flatMap(producer => graph.nodes.find(row => row.id === producer)?.outputs ?? [])
@@ -604,7 +765,7 @@ export async function runAgentV2(request: string, deviceId: string, executionId:
     try { await execution?.close(); } catch { terminal = 'FAILED'; reason = 'Session cleanup is uncertain; inspect retained device ownership.'; }
     emit(terminal, reason);
     publish({ type: 'complete', status: terminal, goalId: graph.id, description: request, reason: reason.slice(0, 180), verifiedSubgoals: graph.nodes.filter(n => n.status === 'VERIFIED').length, totalSubgoals: graph.nodes.length,
-      ...budget.summary(), v2: { temporal, localEffects: [...localJournals.values()].flatMap(j => j.records), reflections, version: 2, graph, discovery: discoveryPlan(graph, world), uiUnderstanding: world && { snapshotId: world.snapshotId, state: world.state, widgets: world.widgets.length, groups: world.groups.length, unknown: world.widgets.filter(w => w.roles.includes('unknown')).length }, sessionId: ownedSessionId, analysis, search, mutations, intent, artifactResolution, completion: allOutcomesVerified(graph) ? 'ALL_VERIFIED' : graph.nodes.some(row => row.status === 'VERIFIED') ? 'PARTIAL' : 'NONE', artifacts: artifacts.summaries(), artifactIds: artifacts.ids(), result: terminal === 'COMPLETED' ? assisted ? 'ASSISTED_COMPLETED' : 'AUTO_COMPLETED' : terminal === 'CANCELLED' ? 'CANCELLED' : terminal === 'BLOCKED' ? 'SAFE_BLOCKED' : 'FAILED' } });
+      ...budget.summary(), v2: { videoDiscovery, youtube, videoResult, browserResult, temporal, localEffects: [...localJournals.values()].flatMap(j => j.records), reflections, version: 2, graph, discovery: discoveryPlan(graph, world), uiUnderstanding: world && { snapshotId: world.snapshotId, state: world.state, widgets: world.widgets.length, groups: world.groups.length, unknown: world.widgets.filter(w => w.roles.includes('unknown')).length }, sessionId: ownedSessionId, analysis, search, mutations, intent, artifactResolution, completion: allOutcomesVerified(graph) ? 'ALL_VERIFIED' : graph.nodes.some(row => row.status === 'VERIFIED') ? 'PARTIAL' : 'NONE', artifacts: artifacts.summaries(), artifactIds: artifacts.ids(), result: terminal === 'COMPLETED' ? assisted ? 'ASSISTED_COMPLETED' : 'AUTO_COMPLETED' : terminal === 'CANCELLED' ? 'CANCELLED' : terminal === 'BLOCKED' ? 'SAFE_BLOCKED' : 'FAILED' } });
     clearTemporalClarification(executionId);
     artifacts.dispose();
   }

@@ -28,9 +28,10 @@ async function ensureWorker(): Promise<WorkerAddress> {
   })().finally(() => { starting = undefined; });
   return starting;
 }
-export async function workerRequest(method: 'GET' | 'POST', body?: unknown, path: '/tasks' | '/reasoning' | '/evidence' = '/tasks', signal?: AbortSignal): Promise<Response> {
+export async function workerRequest(method: 'GET' | 'POST', body?: unknown, path: '/tasks' | '/reasoning' | '/evidence' | '/planning' = '/tasks', signal?: AbortSignal): Promise<Response> {
   signal?.throwIfAborted();
   const connection = await ensureWorker();
+  if (path === '/planning' && (!connection.features?.includes('unified-prepared-plan') || connection.runtimeSha256 !== androidRuntimeDigest())) return Response.json({ error: 'Restart the idle worker: prepared-plan runtime version changed. No execution sent.' }, { status: 409 });
   const command = body as { type?: string; enabled?: boolean; fullControl?: boolean; jobs?: { agentVersion?: number; ownerAuthorizedTest?: boolean }[] } | undefined;
   if (method === 'POST' && path === '/tasks' && (command?.type === 'START' || command?.type === 'SET_OWNER_TEST_MODE' && command.enabled !== false) &&
     (!connection.features?.includes('source-policy-v2') || connection.runtimeSha256 && androidRuntimeDigest() && connection.runtimeSha256 !== androidRuntimeDigest())) {
@@ -47,7 +48,7 @@ export async function workerRequest(method: 'GET' | 'POST', body?: unknown, path
   }
   const query = method === 'GET' && body ? '?' + new URLSearchParams(body as Record<string, string>).toString() : '';
   return fetch(`http://127.0.0.1:${connection.port}${path}${query}`, { method, headers: { Authorization: 'Bearer ' + connection.token, 'Content-Type': 'application/json' },
-    body: method === 'GET' || body === undefined ? undefined : JSON.stringify(body), signal: AbortSignal.any([AbortSignal.timeout(path === '/reasoning' ? 181000 : 20000), ...(signal ? [signal] : [])]), cache: 'no-store' });
+    body: method === 'GET' || body === undefined ? undefined : JSON.stringify(body), signal: AbortSignal.any([AbortSignal.timeout(path === '/reasoning' || path === '/planning' && command?.type === 'PREPARE' ? 181000 : 20000), ...(signal ? [signal] : [])]), cache: 'no-store' });
 }
 export async function queuedOllamaFetch(_url: string, options: RequestInit) {
   return workerRequest('POST', JSON.parse(String(options.body)), '/reasoning', options.signal ?? undefined);

@@ -30,6 +30,7 @@ export function useDashboardDemo() {
   const analysisRequestIdRef = useRef(0);
   const selectedAndroidSerialRef = useRef('');
   const selectedIdsRef = useRef<string[] | undefined>(undefined);
+    const knownLiveSerialsRef = useRef<ReadonlyMap<string, AndroidAdbDevice>>(new Map());
   const executionAbortControllerRef = useRef<AbortController | null>(null);
 
   const refreshAndroidDevices = useCallback(async () => {
@@ -46,18 +47,20 @@ export function useDashboardDemo() {
         throw new Error(payload?.error || 'Không thể tải danh sách thiết bị Android.');
       }
 
-      setAndroidDevices(payload.devices);
-      const liveSelection = resolveLiveDeviceSelection(payload.devices, selectedAndroidSerialRef.current, selectedIdsRef.current);
+      const liveSelection = resolveLiveDeviceSelection(payload.devices, selectedAndroidSerialRef.current, selectedIdsRef.current, knownLiveSerialsRef.current);
+      knownLiveSerialsRef.current = liveSelection.knownLiveSerials;
+      setAndroidDevices(liveSelection.androidDevices);
       setDevices(liveSelection.devices);
       selectedAndroidSerialRef.current = liveSelection.selectedAndroidSerial;
       setSelectedAndroidSerial(liveSelection.selectedAndroidSerial);
       setSelectedDeviceIds(liveSelection.selectedDeviceIds);
       selectedIdsRef.current = liveSelection.selectedDeviceIds;
     } catch (error) {
-      setAndroidDevices([]);
-      selectedAndroidSerialRef.current = '';
-      setSelectedAndroidSerial('');
-      setDevices([]);
+      const unavailable = resolveLiveDeviceSelection([], selectedAndroidSerialRef.current, selectedIdsRef.current, knownLiveSerialsRef.current);
+      setAndroidDevices(unavailable.androidDevices);
+      selectedAndroidSerialRef.current = unavailable.selectedAndroidSerial;
+      setSelectedAndroidSerial(unavailable.selectedAndroidSerial);
+      setDevices(unavailable.devices);
       setSelectedDeviceIds([]);
       setAndroidDevicesError(error instanceof Error ? error.message : 'Không thể tải danh sách thiết bị Android.');
     } finally {

@@ -23,6 +23,12 @@ export async function readTransportIdentity(run: AdbRunner, serial: string, fres
         physicalId: 'android:' + createHash('sha256').update(JSON.stringify([hardwareSerial, manufacturer, model])).digest('hex') };
     }
   } catch (error) {
+    const cancelled = error as { name?: string; code?: string; cause?: { name?: string; code?: string } };
+    const interrupted = cancelled.name === 'AbortError' || cancelled.code === 'ABORT_ERR' || cancelled.cause?.name === 'AbortError' || cancelled.cause?.code === 'ABORT_ERR';
+    // An interrupted background read observed neither presence nor absence.
+    // Discard even the old positive entry: the next consumer must read the
+    // selected transport again, not inherit a fabricated one-second disconnect.
+    if (interrupted) cache.delete(serial);
     if (strictErrors) {
       const failure = error as { cause?: { killed?: boolean; code?: string }; message?: string };
       if (failure.cause?.killed || failure.cause?.code === 'ETIMEDOUT' || /ETIMEDOUT|timed? ?out/i.test(failure.message ?? '')) {
@@ -30,6 +36,7 @@ export async function readTransportIdentity(run: AdbRunner, serial: string, fres
       }
       throw new AndroidExecutionError('DEVICE_ERROR', 'Unable to verify the physical device through the selected transport.', { cause: error });
     }
+    if (interrupted) return undefined;
     // Discovery can keep other devices available without guessing this device's identity.
   }
   if (cache.size > 100) cache.clear();

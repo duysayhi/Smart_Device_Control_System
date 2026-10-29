@@ -126,10 +126,22 @@ function requestedHour(scope: TemporalUiScope, s: Observation) {
   if (!format) throw Error('TIME_FORMAT_UNPROVEN: no observable 24h range or selected AM/PM; no time guessed.');
   return format === '12' ? scope.request.hour % 12 || 12 : scope.request.hour;
 }
+function timerPickerConsistent(scope: TemporalUiScope, s: Observation): boolean {
+  if (scope.request.kind !== 'TIMER') return true;
+  const fields = formFields(scope, s), values = temporalFormValues(scope, s);
+  if (fields.length !== 3 || new Set(fields.map(a => pickerRole(s, a.index))).size !== 3) return false;
+  // Composite accessibility values can expose uncommitted/stale editor text.
+  const summaries = s.nodes.filter(n => shown(n) && fields.every(a => isDescendant(s.nodes, s.nodes[a.index], n)) && n.description.trim());
+  for (const summary of summaries) {
+    const match = /^(\d{1,2})\s*(?:hours?|gio)\s*,?\s*(\d{1,2})\s*(?:minutes?|phut)\s*,?\s*(\d{1,2})\s*(?:seconds?|giay)\s*,?$/.exec(foldIntent(summary.description).trim());
+    if (match && (Number(match[1]) !== values.hour || Number(match[2]) !== values.minute || Number(match[3]) !== values.second)) return false;
+  }
+  return true;
+}
 export function temporalFormExact(scope: TemporalUiScope, s: Observation): boolean {
   const r = scope.request, v = temporalFormValues(scope, s);
   if (v.hour !== requestedHour(scope, s) || v.minute !== (r.kind === 'ALARM' ? r.minute : Math.floor(r.seconds % 3600 / 60))) return false;
-  if (r.kind === 'TIMER') return v.second === r.seconds % 60;
+  if (r.kind === 'TIMER') return v.second === r.seconds % 60 && timerPickerConsistent(scope, s);
   if (alarmFormat(scope, s) === '12') {
     const selected = periodControls(scope, s).filter(a => a.selected || a.checked);
     if (selected.length !== 1 || /^(pm|chieu)$/.test(foldIntent(selected[0].label)) !== (r.hour >= 12)) return false;
@@ -197,7 +209,7 @@ export function temporalUiTransition(c: GroundedCandidateV2, s: Observation) {
   if (c.action === 'SET_VALUE') {
     if (c.temporal?.phase === 'LABEL') return s.nodes.some(n => /EditText/.test(n.className) && n.text === c.value);
     const matches = formFields(scope, s).filter(a => pickerRole(s, a.index) === c.temporal?.phase);
-    return matches.length === 1 && pickerValue(matches[0].text) === Number(c.value);
+    return matches.length === 1 && pickerValue(matches[0].text) === Number(c.value) && timerPickerConsistent(scope, s);
   }
   return temporalFormExact(scope, s);
 }

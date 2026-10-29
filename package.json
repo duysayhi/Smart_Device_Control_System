@@ -1,9 +1,11 @@
+
 {
   "name": "smart_device_control_system",
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "next dev",
+    "dev": "node scripts/dev-services.cjs",
+    "dev:web": "next dev",
     "agent:worker": "node scripts/agent-worker.cjs",
     "agent:worker:stop": "node scripts/agent-worker.cjs --stop",
     "build": "next build",

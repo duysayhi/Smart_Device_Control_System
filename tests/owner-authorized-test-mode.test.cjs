@@ -112,7 +112,7 @@ test('runtime validates selected physical identity and V2 opt-in; restart never 
   const command = { type: 'SET_OWNER_TEST_MODE', deviceId: 'A', physicalId: 'physical-a', enabled: true };
   await assert.rejects(registry.setOwnerTestMode({ ...command, physicalId: 'foreign' }));
   assert.equal(RuntimeCommand.safeParse({ type: 'START', requestId: randomUUID(), jobs: [{ deviceId: 'A', goal, ownerAuthorizedTest: true }] }).success, false);
-  const start = () => registry.start({ type: 'START', requestId: randomUUID(), jobs: [{ deviceId: 'A', goal, agentVersion: 2, ownerAuthorizedTest: true }] });
+  const start = () => registry.start({ type: 'START', requestId: randomUUID(), jobs: [{ deviceId: 'A', goal: 'Mo ' + pkg, agentVersion: 2, ownerAuthorizedTest: true }] });
   await assert.rejects(start()); await registry.setOwnerTestMode(command);
   const [task] = await start(); await registry.settled(task.executionId);
   assert.equal(registry.list()[0].status, 'COMPLETED'); assert.ok(task.ownerTestMode);
@@ -128,7 +128,7 @@ test('disabling mode cancels an active owner execution but leaves another device
   let opens = 0;
   const registry = new DeviceRuntimeRegistry({ discover: async () => devices, v2: () => ({ readiness: async () => 'UNLOCK_REQUIRED', catalog: { resolve: async () => { throw Error('Must not discover locked phone'); } }, open: async () => { opens++; throw Error('Must not open Session'); } }) });
   await registry.setOwnerTestMode({ type: 'SET_OWNER_TEST_MODE', deviceId: 'A', physicalId: 'physical-a', enabled: true });
-  const tasks = await registry.start({ type: 'START', requestId: randomUUID(), jobs: [{ deviceId: 'A', goal, agentVersion: 2, ownerAuthorizedTest: true }, { deviceId: 'B', goal, agentVersion: 2 }] });
+  const tasks = await registry.start({ type: 'START', requestId: randomUUID(), jobs: [{ deviceId: 'A', goal: 'Mo ' + pkg, agentVersion: 2, ownerAuthorizedTest: true }, { deviceId: 'B', goal: 'Mo ' + pkg, agentVersion: 2 }] });
   try {
     for (let i = 0; i < 100 && !registry.list().every(t => t.status === 'WAITING_HUMAN'); i++) await new Promise(r => setImmediate(r));
     assert.equal(registry.list().every(t => t.status === 'WAITING_HUMAN'), true);
