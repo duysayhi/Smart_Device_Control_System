@@ -5,6 +5,123 @@ import { normalizeUiText, matchUiTarget } from '../ui-understanding';
 import { clippedBounds, isDescendant } from '../exploration/scroll-regions';
 import { isSensitiveControl, isReadInformationLabel } from '../security-policy';
 
+export type RequiredCapability = { name: 'APP_READY' | 'SEARCH_CONTENT' | 'FIND_SECTION' | 'READ_PAGE' | 'SELECT_RESULT'; target?: string; ready: boolean };
+export interface CurrentScreenState {
+  deviceId: string; executionId: string; snapshotId: string; foregroundPackage: string; foregroundActivity?: string;
+  screenType: 'ROOT' | 'CONTENT_DETAIL' | 'SEARCH_ENTRY' | 'SEARCH_INPUT' | 'SEARCH_RESULTS' | 'MEDIA_PLAYBACK' | 'FULLSCREEN' | 'MENU' | 'DIALOG' | 'LOADING' | 'LIST' | 'FORM' | 'UNKNOWN';
+  navigationContext: 'ROOT' | 'DETAIL' | 'FULLSCREEN' | 'OVERLAY' | 'UNKNOWN';
+  visibleCapabilities: string[]; activeOverlay?: 'DIALOG' | 'MENU' | 'SYSTEM_UI'; focusedElement?: string;
+  loadingState: boolean; confidence: 'EVIDENCE' | 'UNKNOWN' | 'AMBIGUOUS'; evidence: string[]; observedAt: number;
+}
+
+function screenHeadings(s: Observation): UiNode[] {
+  return s.nodes.filter(n => {
+    if (!visibleNode(s, n) || n.clickable || !(n.text || n.description).trim()) return false;
+    if (/toolbar|action_bar|page_title|screen_title/.test(n.resourceId)) return true;
+    let parent = n.parentIndex;
+    const visited = new Set<number>();
+    while (parent !== undefined && !visited.has(parent)) {
+      visited.add(parent);
+      const ancestor = s.nodes[parent];
+      if (!ancestor || ancestor.clickable) return false;
+      if (/toolbar|action_bar/.test(ancestor.resourceId)) return true;
+      parent = ancestor.parentIndex;
+    }
+    return false;
+  });
+}
+
+export function understandCurrentScreen(s: Observation, executionId: string): CurrentScreenState {
+  const visible = s.nodes.filter(n => visibleNode(s, n));
+  const input = visible.filter(n => n.focused && /EditText|AutoCompleteTextView/.test(n.className));
+  const dialog = visible.some(n => /Dialog/.test(n.className) || n.resourceId === 'android:id/alertTitle');
+  const menu = visible.some(n => /PopupWindow/.test(n.className) || /:id\/(app_menu_list|popup_menu|menu_list)$/.test(n.resourceId));
+  const system = s.nodes.some(n => n.displayed !== false && /permissioncontroller|packageinstaller/.test(n.packageName) ||
+    n.displayed !== false && n.packageName === 'com.android.systemui' && /keyguard|bouncer|notification_panel|qs_panel/.test(n.resourceId));
+  const loading = visible.some(n => /ProgressBar/.test(n.className));
+  const players = visible.filter(n => /:id\/(watch_player|player_view)$/.test(n.resourceId));
+  const searchInput = input.length === 1 && /search|query|url_bar|omnibox|address/.test(input[0].resourceId);
+  const search = searchControl(s) || visible.find(n => /:id\/(url_bar|omnibox|address_bar)$/.test(n.resourceId));
+  const fullscreen = players.some(n => {
+    const [l, t, r, b] = n.bounds;
+    return (r - l) * (b - t) >= s.viewport.width * s.viewport.height * .85;
+  }) && visible.some(n => /:id\/(fullscreen|player_overlays|watch_player)$/.test(n.resourceId)) && !search;
+  const media = s.screen === 'VIDEO_PLAYER' && players.length > 0;
+  const up = visible.some(n => /^(navigate up|back|quay lai|dieu huong len|tro ve)$/.test(normalizeUiText(n.description || n.text)) && safeNavigationOwner(s, n));
+  const list = visible.some(n => n.scrollable && /RecyclerView|ListView|ScrollView/.test(n.className));
+  const heading = screenHeadings(s).length > 0;
+  const root = !up && visible.some(n => /:id\/(bottom_navigation|bottom_navigation_view|bottom_bar|navigation_bar|pivot_bar)$/.test(n.resourceId)) &&
+    visible.some(n => n.selected && /^(home|trang chu)$/.test(normalizeUiText(n.text || n.description)));
+  const observed = s.observationStatus === 'OBSERVED' && visible.length > 0 && !system;
+  const screenType: CurrentScreenState['screenType'] = !observed ? 'UNKNOWN' : dialog ? 'DIALOG' : menu ? 'MENU' : loading ? 'LOADING' :
+    fullscreen ? 'FULLSCREEN' : searchInput ? 'SEARCH_INPUT' : s.screen === 'SEARCH_RESULTS' || s.web?.status === 'DOM_AVAILABLE' && s.web.document.links.length > 0 && /[?&](q|query)=/.test(s.web.document.url) ? 'SEARCH_RESULTS' :
+    media ? 'MEDIA_PLAYBACK' : input.length ? 'FORM' : root ? 'ROOT' :
+    s.web?.status === 'DOM_AVAILABLE' || visible.some(n => /WebView/.test(n.className)) || up && heading ? 'CONTENT_DETAIL' : search ? 'SEARCH_ENTRY' : list ? 'LIST' : 'UNKNOWN';
+  return { deviceId: s.deviceSerial, executionId, snapshotId: s.snapshotId, foregroundPackage: s.foregroundPackage,
+    foregroundActivity: s.activity, screenType, navigationContext: system || dialog || menu ? 'OVERLAY' : fullscreen ? 'FULLSCREEN' : media || up && heading ? 'DETAIL' : root ? 'ROOT' : 'UNKNOWN',
+    visibleCapabilities: [...(search || searchInput ? ['SEARCH_CONTENT'] : []), ...(searchInput ? ['SEARCH_INPUT'] : []), ...(list ? ['BROWSE_CONTENT'] : [])],
+    activeOverlay: system ? 'SYSTEM_UI' : dialog ? 'DIALOG' : menu ? 'MENU' : undefined,
+    focusedElement: input.length === 1 ? s.elements[s.nodes.indexOf(input[0])]?.elementId : undefined,
+    loadingState: loading, confidence: !observed || screenType === 'UNKNOWN' ? 'UNKNOWN' : input.length > 1 ? 'AMBIGUOUS' : 'EVIDENCE',
+    evidence: visible.filter(n => n === search || players.includes(n) || /toolbar|action_bar|metadata|menu|Dialog/.test(n.resourceId + n.className)).slice(0, 8)
+      .map(n => n.resourceId || n.className), observedAt: s.timestamp };
+}
+
+export function resolveRequiredCapability(goal: AgentGoal, s: Observation): RequiredCapability {
+  const c = goal.subgoals[goal.currentSubgoal]?.criterion;
+  const same = goalPackageAllowed(goal, s.foregroundPackage) && s.observationStatus === 'OBSERVED';
+  if (!c || c.kind === 'FOREGROUND') return { name: 'APP_READY', ready: same && s.nodes.some(n => visibleNode(s, n)) };
+  if (c.kind === 'SEARCH_RESULTS') {
+    const target = goal.spec.resultType === 'browser' ? 'address_bar' : 'search_button';
+    const match = matchUiTarget(s, target, false);
+    return { name: 'SEARCH_CONTENT', target, ready: same && (match.status === 'MATCH' && Boolean(match.node && visibleNode(s, match.node)) ||
+      understandCurrentScreen(s, goal.id).visibleCapabilities.includes('SEARCH_INPUT')) };
+  }
+  const target = c.target;
+  const match = matchUiTarget(s, target, false);
+  return { name: c.kind === 'DESTINATION' ? 'SELECT_RESULT' : c.kind === 'NATIVE_PAGE' ? 'READ_PAGE' : 'FIND_SECTION', target,
+    ready: same && match.status === 'MATCH' && Boolean(match.node && visibleNode(s, match.node)) };
+}
+
+// Route evidence is derived afresh; no remembered back stack authorizes an action.
+export function capabilityRouteNodes(goal: AgentGoal, s: Observation): { index: number; kind: 'UP' | 'MENU' | 'EXIT_FULLSCREEN' | 'MEDIA_BACK' }[] {
+  const required = resolveRequiredCapability(goal, s), state = understandCurrentScreen(s, goal.id);
+  if (required.ready || required.name === 'APP_READY' || required.name === 'SELECT_RESULT' || !goalPackageAllowed(goal, s.foregroundPackage) ||
+    state.confidence !== 'EVIDENCE' || state.activeOverlay || state.loadingState || hasUnsavedInput(goal, s) || goal.spec.isSensitive ||
+    s.nodes.some(n => visibleNode(s, n) && /EditText|AutoCompleteTextView/.test(n.className) && n.text.trim())) return [];
+  const nodes: ReturnType<typeof capabilityRouteNodes> = [];
+  s.nodes.forEach((n, index) => {
+    if (!visibleNode(s, n) || !safeNavigationOwner(s, n)) return;
+    const label = normalizeUiText(n.description || n.text);
+    if (/^(navigate up|back|quay lai|dieu huong len|tro ve)$/.test(label) && state.navigationContext === 'DETAIL') nodes.push({ index, kind: 'UP' });
+    if (state.screenType === 'FULLSCREEN' && /^(exit full screen|exit fullscreen|thoat toan man hinh)$/.test(label)) nodes.push({ index, kind: 'EXIT_FULLSCREEN' });
+    if (required.name === 'SEARCH_CONTENT' && /^(more options|more|menu|tuy chon khac|lua chon khac)$/.test(label) &&
+      /toolbar|action_bar|menu/.test(n.resourceId)) nodes.push({ index, kind: 'MENU' });
+  });
+  if (required.name === 'SEARCH_CONTENT' && ['MEDIA_PLAYBACK', 'FULLSCREEN'].includes(state.screenType) && !nodes.some(n => n.kind !== 'MENU')) {
+    const players = s.nodes.map((n, index) => ({ n, index })).filter(({ n }) => visibleNode(s, n) && n.resourceId.endsWith(':id/watch_player'));
+    if (players.length === 1) nodes.push({ index: players[0].index, kind: 'MEDIA_BACK' });
+  }
+  return nodes;
+}
+
+export function verifyCapabilityRoute(goal: AgentGoal, before: Observation, after: Observation, kind: string): boolean {
+  if (after.observationStatus !== 'OBSERVED' || before.snapshotId === after.snapshotId || before.deviceSerial !== after.deviceSerial ||
+    !goalPackageAllowed(goal, after.foregroundPackage) || before.foregroundPackage !== after.foregroundPackage ||
+    after.timestamp < before.timestamp || Date.now() - after.timestamp > 5000) return false;
+  const old = understandCurrentScreen(before, goal.id), fresh = understandCurrentScreen(after, goal.id);
+  if (fresh.activeOverlay === 'SYSTEM_UI' || fresh.confidence !== 'EVIDENCE') return false;
+  if (resolveRequiredCapability(goal, after).ready) return true;
+  if (kind === 'MENU') return fresh.screenType === 'MENU' && old.screenType !== 'MENU';
+  if (old.screenType === 'FULLSCREEN') return fresh.screenType === 'MEDIA_PLAYBACK';
+  // A changed heading proves one level of Up, not completion of the parent goal.
+  if (kind === 'UP' && !['FORM', 'DIALOG', 'FULLSCREEN'].includes(fresh.screenType)) {
+    const headings = (s: Observation) => screenHeadings(s).map(n => n.text || n.description).join('|');
+    return Boolean(headings(before) && headings(after) && headings(before) !== headings(after));
+  }
+  return false;
+}
+
 export const isReadLocationGoal = (goal: AgentGoal) => goal.spec.operation === 'FIND_PLACE';
 export const storageSubject = (goal: AgentGoal) => isReadLocationGoal(goal) && /\b(bo nho|luu tru|storage|memory)\b/.test(normalizeUiText(goal.spec.targetText ?? ''));
 export function goalPackageAllowed(goal: AgentGoal, packageName: string): boolean {

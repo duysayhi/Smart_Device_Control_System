@@ -1,10 +1,16 @@
 import { listAndroidDevices, readAndroidDeviceDetails } from '@/lib/android/adb';
+import { readDeviceOwnership } from '@/lib/android/appium/session-manager';
+import { runAdb } from '@/lib/android/adb';
 
 export async function GET() {
   try {
     const detectedDevices = await listAndroidDevices();
     const devices = await Promise.all(detectedDevices.map(async (device) => ({
       ...await readAndroidDeviceDetails(device),
+      ...await (async () => {
+        const owner = await readDeviceOwnership(device.serial, runAdb);
+        return { busy: Boolean(owner), currentSessionId: owner?.sessionId, currentExecutionId: owner?.executionId };
+      })(),
       ...(device.status === 'device'
         ? { screenshotUrl: `/api/devices/${encodeURIComponent(device.serial)}/screenshot?refresh=${Date.now()}` }
         : {}),

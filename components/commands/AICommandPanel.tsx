@@ -9,6 +9,7 @@ import { AndroidAdbDevice } from '@/types/device';
 import { ExecutionStepResult } from '@/types/execution';
 import { AgentGoalPanel } from './AgentGoalPanel';
 import type { AgentRuntimeControl } from '@/hooks/useAgentRuntimes';
+import { UnifiedAgentPanel } from './UnifiedAgentPanel';
 
 const explorationLabels = {
   SEARCHING: 'Đang tìm phần tử', CHECKING_LIST: 'Đang kiểm tra danh sách', SCROLLING: 'Đang cuộn',
@@ -42,7 +43,7 @@ interface AICommandPanelProps {
   inspectedExecutionId?: string;
 }
 
-export const AICommandPanel: React.FC<AICommandPanelProps> = ({
+export const LegacyAICommandPanel: React.FC<AICommandPanelProps> = ({
   commandText,
   onCommandChange,
   androidDevices,
@@ -69,7 +70,7 @@ export const AICommandPanel: React.FC<AICommandPanelProps> = ({
 }) => {
   const [mode, setMode] = React.useState<'plan' | 'agent'>('agent');
   const selectedDevice = androidDevices.find((device) => device.serial === selectedAndroidSerial);
-  const targetCount = selectedDevice?.status === 'device' && selectedDevice.connectionType === 'USB' ? 1 : 0;
+  const targetCount = selectedDevice?.status === 'device' && (selectedDevice.connectionType === 'USB' || selectedDevice.identityVerified) ? 1 : 0;
 
   return (
     <div className="bg-white rounded-xl border border-slate-200 p-5 shadow-xs flex flex-col gap-4">
@@ -150,3 +151,8 @@ export const AICommandPanel: React.FC<AICommandPanelProps> = ({
     </div>
   );
 };
+
+export const AICommandPanel: React.FC<AICommandPanelProps> = props => <div className="bg-white rounded-lg border border-slate-200 p-5 shadow-xs min-w-0">
+  <UnifiedAgentPanel text={props.commandText} onText={props.onCommandChange} devices={props.androidDevices} serial={props.selectedAndroidSerial}
+    onSerial={props.onAndroidDeviceChange} onRefresh={props.onRefreshAndroidDevices} runtime={props.runtime} selectedDeviceIds={props.selectedDeviceIds} inspectedExecutionId={props.inspectedExecutionId} />
+</div>;

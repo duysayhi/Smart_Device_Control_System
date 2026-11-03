@@ -1,18 +1,21 @@
 import { execFile } from 'node:child_process';
 import { Action } from '@/lib/validators/action-plan.schema';
 import { AndroidAdbDevice, AndroidAdbStatus } from '@/types/device';
-import { createAndroidExecutor } from './executor';
+import { createAndroidExecutor, type AdbReadOptions } from './executor';
+import { transportMode, readTransportIdentity } from './transport-identity';
+import { wirelessIdentityAllowed } from './wireless-store';
 
 const SERIAL_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 
-export function runAdb(args: string[], timeoutMs = 20000): Promise<{ stdout: string; stderr: string }> {
+export function runAdb(args: string[], timeoutMs = 20000, options?: AdbReadOptions): Promise<{ stdout: string; stderr: string }> {
   return new Promise((resolve, reject) => {
     execFile(
       process.env.ADB_PATH ?? 'adb',
       args,
       {
         encoding: 'utf8',
-        maxBuffer: 1024 * 1024,
+        maxBuffer: Math.min(4 * 1024 * 1024, Math.max(1024 * 1024, options?.maxBufferBytes ?? 1024 * 1024)),
+        signal: options?.signal,
         shell: false,
         timeout: timeoutMs,
         windowsHide: true,
@@ -44,7 +47,7 @@ async function getAdbOutput(serial: string, args: string[]): Promise<string> {
 export async function listAndroidDevices(): Promise<AndroidAdbDevice[]> {
   const { stdout } = await runAdb(['devices', '-l']);
 
-  return stdout
+  const devices: AndroidAdbDevice[] = stdout
     .split(/\r?\n/)
     .slice(1)
     .flatMap((line): AndroidAdbDevice[] => {
@@ -62,9 +65,15 @@ export async function listAndroidDevices(): Promise<AndroidAdbDevice[]> {
         serial,
         model,
         status,
-        connectionType: serial.includes(':') ? 'Wi-Fi' : 'USB',
+        connectionType: transportMode(serial),
       }];
     });
+  for (const device of devices) {
+    if (device.status !== 'device') continue;
+    const identity = await readTransportIdentity(runAdb, device.serial);
+    if (identity) { device.physicalId = identity.physicalId; device.identityVerified = device.connectionType === 'USB' || await wirelessIdentityAllowed(device.serial, identity.physicalId); device.manufacturer=identity.manufacturer;device.osVersion=identity.osVersion; }
+  }
+  return devices;
 }
 
 export async function readAndroidDeviceDetails(device: AndroidAdbDevice): Promise<AndroidAdbDevice> {

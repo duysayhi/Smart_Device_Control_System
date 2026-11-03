@@ -18,6 +18,7 @@ export function useDashboardDemo() {
   const [commandText, setCommandText] = useState(SAMPLE_COMMANDS[0].prompt);
   const [planStatus, setPlanStatus] = useState<PlanStatus>('IDLE');
   const [currentPlan, setCurrentPlan] = useState<ActionPlan | null>(null);
+  const [planAuthorization, setPlanAuthorization] = useState<string>();
   const [analysisError, setAnalysisError] = useState<string | null>(null);
   const [executionSteps, setExecutionSteps] = useState<ExecutionStepResult[]>([]);
   const [executionStatus, setExecutionStatus] = useState<'IDLE' | 'RUNNING' | 'SUCCESS' | 'FAILED' | 'SENT'>('IDLE');
@@ -29,6 +30,7 @@ export function useDashboardDemo() {
   const analysisRequestIdRef = useRef(0);
   const selectedAndroidSerialRef = useRef('');
   const selectedIdsRef = useRef<string[] | undefined>(undefined);
+    const knownLiveSerialsRef = useRef<ReadonlyMap<string, AndroidAdbDevice>>(new Map());
   const executionAbortControllerRef = useRef<AbortController | null>(null);
 
   const refreshAndroidDevices = useCallback(async () => {
@@ -45,18 +47,20 @@ export function useDashboardDemo() {
         throw new Error(payload?.error || 'Không thể tải danh sách thiết bị Android.');
       }
 
-      setAndroidDevices(payload.devices);
-      const liveSelection = resolveLiveDeviceSelection(payload.devices, selectedAndroidSerialRef.current, selectedIdsRef.current);
+      const liveSelection = resolveLiveDeviceSelection(payload.devices, selectedAndroidSerialRef.current, selectedIdsRef.current, knownLiveSerialsRef.current);
+      knownLiveSerialsRef.current = liveSelection.knownLiveSerials;
+      setAndroidDevices(liveSelection.androidDevices);
       setDevices(liveSelection.devices);
       selectedAndroidSerialRef.current = liveSelection.selectedAndroidSerial;
       setSelectedAndroidSerial(liveSelection.selectedAndroidSerial);
       setSelectedDeviceIds(liveSelection.selectedDeviceIds);
       selectedIdsRef.current = liveSelection.selectedDeviceIds;
     } catch (error) {
-      setAndroidDevices([]);
-      selectedAndroidSerialRef.current = '';
-      setSelectedAndroidSerial('');
-      setDevices([]);
+      const unavailable = resolveLiveDeviceSelection([], selectedAndroidSerialRef.current, selectedIdsRef.current, knownLiveSerialsRef.current);
+      setAndroidDevices(unavailable.androidDevices);
+      selectedAndroidSerialRef.current = unavailable.selectedAndroidSerial;
+      setSelectedAndroidSerial(unavailable.selectedAndroidSerial);
+      setDevices(unavailable.devices);
       setSelectedDeviceIds([]);
       setAndroidDevicesError(error instanceof Error ? error.message : 'Không thể tải danh sách thiết bị Android.');
     } finally {
@@ -101,10 +105,10 @@ export function useDashboardDemo() {
   }, [devices]);
 
   const handleSelectAll = useCallback((deviceIds: string[]) => {
-    const liveDevice = devices.find((device) => device.isLive && device.status === 'READY' && device.connectionType === 'USB' && deviceIds.includes(device.id));
+    const liveDevice = devices.find((device) => device.isLive && device.status === 'READY' && deviceIds.includes(device.id));
     if (liveDevice) {
       selectedAndroidSerialRef.current = liveDevice.serial;
-      const selected = devices.filter(device => device.isLive && device.status === 'READY' && device.connectionType === 'USB' && deviceIds.includes(device.id)).map(device => device.id);
+      const selected = devices.filter(device => device.isLive && device.status === 'READY' && deviceIds.includes(device.id)).map(device => device.id);
       selectedIdsRef.current = selected;
       setSelectedDeviceIds(selected);
       setSelectedAndroidSerial(liveDevice.serial);
@@ -133,6 +137,7 @@ export function useDashboardDemo() {
 
     const requestId = ++analysisRequestIdRef.current;
     setPlanStatus('ANALYZING');
+    setPlanAuthorization(undefined);
     setCurrentPlan(null);
     setAnalysisError(null);
 
@@ -140,12 +145,13 @@ export function useDashboardDemo() {
       const response = await fetch('/api/commands/interpret', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ prompt: commandText }),
+        body: JSON.stringify({ prompt: commandText, ...(selectedAndroidSerial ? { deviceId: selectedAndroidSerial } : {}) }),
       });
       const payload = await response.json().catch(() => null) as {
         success?: boolean;
         error?: string;
         actionPlan?: unknown;
+        authorizationToken?: string;
       } | null;
       if (!response.ok || payload?.success !== true) {
         throw new Error(payload?.error || 'Không thể phân tích lệnh.');
@@ -155,11 +161,12 @@ export function useDashboardDemo() {
       if (!parsedPlan.success) throw new Error('Action Plan trả về từ API không hợp lệ.');
       if (requestId !== analysisRequestIdRef.current) return;
 
+      setPlanAuthorization(payload.authorizationToken);
       setCurrentPlan({
         ...parsedPlan.data,
         commandPrompt: commandText,
         targetCount: androidDevices.some((device) =>
-          device.serial === selectedAndroidSerial && device.status === 'device' && device.connectionType === 'USB'
+          device.serial === selectedAndroidSerial && device.status === 'device'
         ) ? 1 : 0,
       });
       setPlanStatus('SUCCESS');
@@ -184,7 +191,6 @@ export function useDashboardDemo() {
     if (
       !currentPlan ||
       targetDevice?.status !== 'device' ||
-      targetDevice.connectionType !== 'USB' ||
       isExecuting ||
       executionAbortControllerRef.current
     ) return;
@@ -212,12 +218,28 @@ export function useDashboardDemo() {
     })));
 
     try {
-      const response = await fetch('/api/executions', {
+      const payload = { deviceId: targetDevice.serial, actionPlan: validatedPlan.data, originalRequest: currentPlan.commandPrompt, authorizationToken: planAuthorization };
+      let response = await fetch('/api/executions', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ deviceId: targetDevice.serial, actionPlan: validatedPlan.data }),
+        body: JSON.stringify(payload),
         signal: controller.signal,
       });
+      if (response.status === 409) {
+        const challenge = await response.clone().json().catch(() => null) as { confirmationRequired?: boolean; confirmationToken?: string; wifiEnabled?: boolean; wifiNetwork?: string } | null;
+        if (challenge?.confirmationRequired && challenge.confirmationToken) {
+          const message = challenge.wifiNetwork !== undefined
+            ? `Kết nối Wi-Fi “${challenge.wifiNetwork}” trên ${targetDevice.model} (${targetDevice.serial})? Wi-Fi sẽ được bật nếu cần. Nếu hỏi mật khẩu, nhập và bấm Kết nối trực tiếp trên điện thoại trong 2 phút. Không nhập mật khẩu vào câu lệnh.`
+            : challenge.wifiEnabled
+            ? `Bật Wi-Fi trên ${targetDevice.model} (${targetDevice.serial})? Điện thoại có thể tự kết nối mạng đã lưu.`
+            : `Tắt Wi-Fi trên ${targetDevice.model} (${targetDevice.serial})? Điện thoại sẽ mất kết nối Wi-Fi. Kết nối điều khiển USB vẫn được giữ.`;
+          if (!window.confirm(message)) {
+            setExecutionStatus('IDLE'); setExecutionSteps([]); return;
+          }
+          response = await fetch('/api/executions', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ ...payload, confirmationToken: challenge.confirmationToken }), signal: controller.signal });
+        }
+      }
       if (!response.ok) {
         const payload = await response.json().catch(() => null) as { error?: string } | null;
         throw new Error(payload?.error || 'Không thể bắt đầu thực thi trên thiết bị.');
@@ -241,13 +263,16 @@ export function useDashboardDemo() {
             if (step.status === 'PENDING' || loggedStates.get(step.index) === key) continue;
             loggedStates.set(step.index, key);
             confirmedLogs.push({
-              id: `step-${Date.now()}-${step.index}`, timestamp: new Date().toTimeString().split(' ')[0],
+              id: `step-${crypto.randomUUID()}-${step.index}`, timestamp: new Date().toTimeString().split(' ')[0],
               deviceId: targetDevice.serial, deviceName: targetDevice.model,
               message: `${step.action.type}: ${step.errorCode ?? step.exploration?.phase ?? step.phase ?? step.status}${step.waitingFor ? ` (${step.waitingFor})` : ''}${step.exploration ? ` - cuộn ${step.exploration.scrollCount}, snapshot ${step.exploration.snapshotCount}, mới ${step.exploration.newElements}, trùng ${step.exploration.duplicateElements}` : ''}${step.postcondition ? ` - ${step.postcondition}` : ''}`,
               status: step.status === 'FAILED' ? 'FAILED' : step.status === 'SUCCESS' ? 'SUCCESS' : step.status === 'SENT' ? 'INFO' : 'EXECUTING'
             });
           }
-          if (confirmedLogs.length) setLogs((previous) => [...confirmedLogs.reverse(), ...previous].slice(0, 500));
+          if (confirmedLogs.length) {
+            const newestFirst = confirmedLogs.toReversed();
+            setLogs((previous) => [...newestFirst, ...previous].slice(0, 500));
+          }
         }
         if (event.type === 'complete') {
           completed = true;
@@ -303,7 +328,7 @@ export function useDashboardDemo() {
       if (executionAbortControllerRef.current === controller) executionAbortControllerRef.current = null;
       setIsExecuting(false);
     }
-  }, [androidDevices, currentPlan, isExecuting, refreshAndroidDevices, selectedAndroidSerial]);
+  }, [androidDevices, currentPlan, isExecuting, planAuthorization, refreshAndroidDevices, selectedAndroidSerial]);
 
   const handleStopExecution = useCallback(() => {
     executionAbortControllerRef.current?.abort();

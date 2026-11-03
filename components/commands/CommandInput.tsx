@@ -119,7 +119,7 @@ export const CommandInput: React.FC<CommandInputProps> = ({
               <option
                 key={device.serial}
                 value={device.serial}
-                disabled={device.status !== 'device' || device.connectionType !== 'USB'}
+                disabled={device.status !== 'device' || device.connectionType === 'Wi-Fi' && !device.identityVerified}
               >
                 {device.model} · {device.serial} · {device.status}
               </option>

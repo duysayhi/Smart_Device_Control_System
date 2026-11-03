@@ -7,6 +7,11 @@ import { verifyBrowserSearch, verifyDiscoveredSelection } from '../action-verifi
 import { goalPackageAllowed, readLocationVerified } from './navigation-semantics';
 import { nativePageVerified, genericNativeGoal, nativeContextSafe, applicationUiBlocked } from './native-navigation';
 import { discoveredApplication } from './application-discovery';
+import { requestRequiresPlayback } from './outcome-spec';
+
+export function goalRequiresPlayback(goal: AgentGoal): boolean {
+  return goal.spec.operation === 'OPEN_RESULT' && goal.spec.resultType === 'video' && requestRequiresPlayback(goal.originalRequest, [goal.spec.query ?? '']);
+}
 
 export function criterionSatisfied(goal: AgentGoal, c: Criterion, s: Observation, selection?: DiscoveredSelection): boolean {
   if (s.observationStatus !== 'OBSERVED' || !goalPackageAllowed(goal, s.foregroundPackage)) return false;
@@ -27,6 +32,8 @@ export function criterionSatisfied(goal: AgentGoal, c: Criterion, s: Observation
     const b = m.node.bounds, clip = clippedBounds(s, m.node), area = (b[2] - b[0]) * (b[3] - b[1]);
     return area > 0 && Math.max(0, clip[2] - clip[0]) * Math.max(0, clip[3] - clip[1]) >= .9 * area;
   }
+  if (goalRequiresPlayback(goal) && (!s.playback || s.playback.source !== 'ADB_MEDIA_SESSION' || s.playback.packageName !== goal.packageName ||
+    s.playback.title.normalize('NFC').trim() !== selection?.title.normalize('NFC').trim() || s.playback.positionMs <= s.playback.previousPositionMs)) return false;
   return Boolean(selection && selection.ordinal === c.ordinal && selection.itemType === c.resultType &&
     goal.subgoals.some(sub => sub.criterion.kind === 'SEARCH_RESULTS' && sub.status === 'VERIFIED') &&
     verifyDiscoveredSelection(selection, s, s));

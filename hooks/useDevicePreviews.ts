@@ -9,7 +9,8 @@ export function useDevicePreviews(devices: Device[], selectedIds: string[], deta
   return devices.map(device => {
     if (!device.isLive || !device.screenshotUrl || device.status === 'OFFLINE' || device.status === 'UNAUTHORIZED') return device;
     const detailed = device.id === detailId, selected = selectedIds.includes(device.id);
-    const interval = detailed || selected ? 4000 : 20000, width = detailed ? 720 : selected ? 360 : 180;
+    const interval = device.connectionType === 'Wi-Fi' ? detailed || selected ? 6000 : 30000 : detailed || selected ? 4000 : 20000;
+    const width = detailed ? 720 : selected ? 360 : 180;
     return { ...device, screenshotUrl: `/api/devices/${encodeURIComponent(device.serial)}/screenshot?width=${width}&frame=${Math.floor(version / interval)}` };
   });
 }

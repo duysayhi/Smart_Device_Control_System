@@ -96,6 +96,37 @@ test('SIMULATION: device error and reconnect never restart an unverified action 
   fake.reconnect(); await registry.refreshConnections(); assert.equal(registry.list()[0].status, 'DISCONNECTED');
   assert.equal(fake.instances.get('SIM-A').actions.length, 1);
 });
+
+test('SIMULATION: USB and Wi-Fi aliases are one scheduled physical device, not two independent Agents', async () => {
+  const gate = deferred(), fake = adapterFor({ gates: { 'SIM-A': gate } });
+  const usb = { ...devices[0], physicalId: 'same-phone', identityVerified: true };
+  const wifi = { ...usb, serial: '192.168.50.9:5555', connectionType: 'Wi-Fi' };
+  fake.adapter.discover = async () => [usb, wifi, devices[1]];
+  const registry = new DeviceRuntimeRegistry(fake.adapter);
+  await assert.rejects(start(registry, [{ deviceId: usb.serial, goal: 'Open Chrome' }, { deviceId: wifi.serial, goal: 'Open Chrome' }]), /same physical device/);
+  const [a] = await start(registry, [{ deviceId: usb.serial, goal: 'Open Chrome' }]);
+  await assert.rejects(start(registry, [{ deviceId: wifi.serial, goal: 'Open Chrome' }]), /Physical device already/);
+  const [b] = await start(registry, [{ deviceId: 'SIM-B', goal: 'Open Settings' }]);
+  await registry.settled(b.executionId); assert.equal(registry.list().find(task => task.executionId === b.executionId).status, 'COMPLETED');
+  gate.resolve(); await registry.settled(a.executionId); assert.equal(fake.instances.get(usb.serial).closed, 1);
+});
+
+test('SIMULATION: loss of Wi-Fi aborts only its execution; reconnect does not resume or switch to USB', async () => {
+  const serial = '192.168.50.9:5555', gate = deferred(), fake = adapterFor({ gates: { [serial]: gate } });
+  const wifi = { ...devices[0], serial, connectionType: 'Wi-Fi', identityVerified: true, physicalId: 'wifi-phone' };
+  const usbAlias = { ...devices[0], physicalId: 'wifi-phone', identityVerified: true };
+  let available = [wifi, usbAlias, devices[1]];
+  fake.adapter.discover = async () => available;
+  const registry = new DeviceRuntimeRegistry(fake.adapter);
+  const created = await start(registry, [{ deviceId: serial, goal: 'Open Chrome' }, { deviceId: 'SIM-B', goal: 'Open Settings' }]);
+  await until(() => fake.reached.has(serial));
+  available = [usbAlias, devices[1]]; await registry.refreshConnections();
+  await registry.settled(created[0].executionId); await registry.settled(created[1].executionId);
+  assert.equal(registry.list()[0].status, 'DISCONNECTED'); assert.equal(registry.list()[1].status, 'COMPLETED');
+  available = [wifi, usbAlias, devices[1]]; await registry.refreshConnections();
+  assert.equal(registry.list()[0].status, 'DISCONNECTED'); assert.equal(fake.instances.get(serial).actions.length, 1);
+  assert.equal(fake.instances.has(usbAlias.serial), false); assert.equal(fake.instances.get(serial).closed, 1);
+});
 test('SIMULATION: discovered disconnect aborts only its active runtime and restores no execution on reconnect', async () => {
   const gates = { 'SIM-A': deferred(), 'SIM-B': deferred() }, fake = adapterFor({ gates }), registry = new DeviceRuntimeRegistry(fake.adapter);
   const created = await start(registry, devices.map(d => ({ deviceId: d.serial, goal: 'Open Chrome' })));
@@ -180,19 +211,24 @@ test('SIMULATION: Dashboard retains multi-selection, renders independent progres
 function humanAdapter() {
   const instances = new Map();
   const adapter = { discover: async () => devices, async plan(request, budget) {
-    const { goal } = await planGoal(request, budget); goal.currentSubgoal = 2; goal.subgoals[0].status = goal.subgoals[1].status = 'VERIFIED'; return goal;
+    const { goal } = await planGoal(request, budget);
+    if (goal.spec.operation !== 'SEARCH' || goal.subgoals.length !== 2) throw Error('Human fixture requires a two-step search goal.');
+    goal.currentSubgoal = 1; goal.subgoals[0].status = 'VERIFIED'; return goal;
   }, async open(goal, budget, serial) {
     const visual = { id: randomUUID(), status: 'HUMAN_REQUIRED', coherent: true, ordinalVerified: true, expiresAt: Date.now() + 10000,
       image: { dataUrl: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/N3sAAAAASUVORK5CYII=', crop: [0, 0, 1, 1] } };
     const state = { taps: 0, closed: 0 }; instances.set(serial, state);
-    const before = snapshot(goal.packageName); before.screen = 'SEARCH_RESULTS'; before.nodes = [{ ...snapshot(goal.packageName, true).nodes[0], className: 'android.view.View', resourceId: goal.packageName + ':id/search_query', text: goal.spec.query }];
+    const before = snapshot(goal.packageName); before.screen = 'SEARCH_INPUT'; before.nodes = [
+      { ...snapshot(goal.packageName, true).nodes[0], className: 'android.widget.EditText', resourceId: goal.packageName + ':id/query_input', text: goal.spec.query, focused: false },
+      { ...snapshot(goal.packageName, true).nodes[0], className: 'android.widget.Button', resourceId: goal.packageName + ':id/search_button', text: 'Search', clickable: true, bounds: [10, 500, 390, 600] },
+    ];
     before.deviceSerial = serial;
-    const after = snapshot(goal.packageName); after.screen = 'VIDEO_PLAYER';
+    const after = snapshot(goal.packageName); after.screen = 'SEARCH_RESULTS';
     after.deviceSerial = serial;
-    after.nodes = [{ ...before.nodes[0], resourceId: goal.packageName + ':id/video_title', text: 'Simulated podcast' }];
-    return { backend: 'appium', observe: async () => ({ ...before, timestamp: Date.now(), snapshotId: randomUUID() }), discoveryMemory() {}, verificationSnapshot: () => ({ ...after, timestamp: Date.now() }),
+    after.nodes = [{ ...before.nodes[0], className: 'android.widget.TextView', resourceId: goal.packageName + ':id/search_query', text: goal.spec.query }];
+    return { backend: 'appium', observe: async () => ({ ...(state.taps ? after : before), timestamp: Date.now(), snapshotId: randomUUID() }), discoveryMemory() {}, verificationSnapshot: () => state.taps ? ({ ...after, timestamp: Date.now() }) : undefined,
       async execute() { const error = new AndroidExecutionError('AMBIGUOUS', 'Activation requires a human point'); error.visual = visual; throw error; },
-      async confirmVisualTap(choice) { assert.equal(choice.evidenceId, visual.id); state.taps++; return { verification: 'VERIFIED', selection: { itemType: 'video', ordinal: 2, title: 'Simulated podcast', identity: serial } }; },
+      async confirmVisualTap(choice) { assert.equal(choice.evidenceId, visual.id); state.taps++; return { verification: 'VERIFIED' }; },
       async close() { state.closed++; } };
   } };
   return { adapter, instances };
@@ -200,7 +236,7 @@ function humanAdapter() {
 test('SIMULATION: Human Assistance is bound to device/execution/token; confirming A never resumes B', async () => {
   const { adapter, instances } = humanAdapter();
   const registry = new DeviceRuntimeRegistry(adapter);
-  const tasks = await start(registry, devices.map(d => ({ deviceId: d.serial, goal: 'Mở YouTube, tìm podcast và phát video thứ hai.' })));
+  const tasks = await start(registry, devices.map(d => ({ deviceId: d.serial, goal: 'Mở YouTube, tìm podcast' })));
   await until(() => registry.list().every(t => t.status === 'WAITING_HUMAN'));
   const [a, b] = registry.list(), assistance = a.latest.assistance;
   const input = { type: 'ASSIST', executionId: a.executionId, deviceId: a.deviceId, token: assistance.token, evidenceId: assistance.evidenceId, x: 120, y: 120, confirmed: true };
@@ -283,7 +319,7 @@ test('SIMULATION HTTP: polling excludes image bytes; evidence is fetched only fo
   try {
     const address = JSON.parse(await promises.readFile(path.join(directory, 'address.json'), 'utf8'));
     const base = `http://127.0.0.1:${address.port}`, headers = { Authorization: 'Bearer ' + address.token, 'Content-Type': 'application/json' };
-    await start(worker.registry, devices.map(device => ({ deviceId: device.serial, goal: 'Mở YouTube, tìm podcast và phát video thứ hai.' })));
+    await start(worker.registry, devices.map(device => ({ deviceId: device.serial, goal: 'Mở YouTube, tìm podcast' })));
     await until(() => worker.registry.list().every(task => task.status === 'WAITING_HUMAN'));
     const text = await (await fetch(base + '/tasks', { headers })).text(); assert.doesNotMatch(text, /data:image/);
     const [a, b] = JSON.parse(text).tasks;

@@ -36,8 +36,9 @@ function mockExecution(goal, budget, initial = 'outside') {
       snapshot(pkg, [node(pkg, { resourceId: pkg + ':id/search_query', text: query })], 'SEARCH_RESULTS');
     if (stage === 'destination') return goal.spec.resultType === 'browser' ? snapshot(pkg, [node(pkg)], 'OBSERVED',
       { status: 'DOM_AVAILABLE', document: { url: selected.url, title: selected.title, headings: [selected.title], readyState: 'complete', links: [] } }) :
-      snapshot(pkg, [node(pkg, { resourceId: pkg + ':id/watch_player' }), node(pkg, { resourceId: pkg + ':id/video_metadata_layout' }),
-        node(pkg, { text: selected.title, parentIndex: 1 })], 'VIDEO_PLAYER');
+      { ...snapshot(pkg, [node(pkg, { resourceId: pkg + ':id/watch_player' }), node(pkg, { resourceId: pkg + ':id/video_metadata_layout' }),
+        node(pkg, { text: selected.title, parentIndex: 1 })], 'VIDEO_PLAYER'),
+        playback: { source: 'ADB_MEDIA_SESSION', packageName: pkg, title: selected.title, positionMs: 2000, previousPositionMs: 1000 } };
     const nodes = goal.spec.operation === 'FIND_ELEMENT' ? [node(pkg, { text: goal.spec.targetText, bounds: stage === 'found' ? [20, 100, 380, 160] : [20, 900, 380, 1000] })] :
       [node(pkg, { description: 'Search', resourceId: pkg + ':id/' + (goal.spec.resultType === 'browser' ? 'url_bar' : 'menu_search') })];
     if (dialog) nodes.push(node(pkg, { className: 'android.app.Dialog', resourceId: 'android:id/alertTitle', text: 'An informational popup' }));

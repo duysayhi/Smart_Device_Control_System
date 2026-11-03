@@ -5,9 +5,9 @@ import { matchUiTarget, normalizeUiText } from '../ui-understanding';
 import { verifyClickTransition } from '../action-verifier';
 import { navigationLayers } from '../browser-navigation';
 import { geometryFingerprint } from '../visual-grounding';
-import { assessPlanPolicy, isSensitiveControl, assessObservedReadNavigation } from '../security-policy';
+import { assessPlanPolicy, isSensitiveControl, assessObservedReadNavigation, assessObservedRouteControl } from '../security-policy';
 import type { AgentGoal } from './schema';
-import { goalPackageAllowed, isReadLocationGoal, observedTarget, searchControl, readNavigationLabel, safeNavigationOwner, visibleNode, hasUnsavedInput } from './navigation-semantics';
+import { goalPackageAllowed, isReadLocationGoal, observedTarget, searchControl, readNavigationLabel, safeNavigationOwner, visibleNode, hasUnsavedInput, capabilityRouteNodes, resolveRequiredCapability, understandCurrentScreen } from './navigation-semantics';
 import { detectScrollRegion } from '../exploration/scroll-regions';
 import { explorationGoal } from '../exploration/types';
 import { genericNativeGoal, nativeContextSafe, nativeReadControl } from './native-navigation';
@@ -18,15 +18,18 @@ const CandidateAction = z.discriminatedUnion('type', [
   z.object({ type: z.literal('WAIT_FOR'), target: z.string().min(1), timeoutMs: z.number().int().positive().max(15000) }).strict(),
   z.object({ type: z.literal('SWIPE'), direction: z.literal('up') }).strict(),
 ]);
-export const CandidateVerificationSchema = z.object({ kind: z.enum(['NAVIGATION_LAYER_REMOVED', 'TARGET_TRANSITION', 'TARGET_VISIBLE', 'FOCUSED_SEARCH', 'READ_NAVIGATION', 'SCROLL_CHANGED']), label: z.string().max(150) }).strict();
+export const CandidateVerificationSchema = z.object({ kind: z.enum(['NAVIGATION_LAYER_REMOVED', 'TARGET_TRANSITION', 'TARGET_VISIBLE', 'FOCUSED_SEARCH', 'READ_NAVIGATION', 'SCROLL_CHANGED', 'CAPABILITY_ROUTE']), label: z.string().max(150) }).strict();
 export const ActionCandidateSchema = z.object({
   candidateId: z.string().min(1), snapshotId: z.string().uuid(), subgoalId: z.string().min(1), fingerprint: z.string(),
-  action: CandidateAction, semanticRole: z.enum(['reversible_navigation', 'goal_control', 'loading_condition', 'search_navigation', 'read_navigation', 'scroll_discovery']),
+  action: CandidateAction, semanticRole: z.enum(['reversible_navigation', 'goal_control', 'loading_condition', 'search_navigation', 'read_navigation', 'scroll_discovery', 'capability_navigation']),
   description: z.string().min(1).max(180), expectedOutcome: z.string().min(1).max(180),
   targetElementId: z.string().min(1), anchorResourceId: z.string(), layers: z.array(z.string()).max(4),
   evidence: z.object({ enabled: z.literal(true), visible: z.literal(true), policy: z.literal('ALLOW') }).strict(),
   preconditions: z.object({ packageName: z.string().min(1), uniqueTarget: z.literal(true), noUnsavedInput: z.literal(true), goalScope: z.literal(true) }).strict(),
   safety: z.literal('READ_NAVIGATION'), verification: CandidateVerificationSchema,
+  routeContext: z.object({ deviceId: z.string().min(1), activity: z.string(), screenType: z.string().min(1), capability: z.string().min(1),
+    viewport: z.tuple([z.number(), z.number(), z.number(), z.number()]), bounds: z.tuple([z.number(), z.number(), z.number(), z.number()]),
+    className: z.string(), label: z.string() }).strict().optional(),
   goalRelation: z.enum(['DIRECT_INFORMATION', 'INFORMATION_CATEGORY', 'SEARCH_ROUTE', 'DISCOVERY_ROUTE', 'REVERSIBLE_ROUTE', 'GOAL_CONTROL']),
 }).strict();
 export type ActionCandidate = z.infer<typeof ActionCandidateSchema>;
@@ -47,20 +50,35 @@ export function generateActionCandidates(goal: AgentGoal, snapshot: Observation)
     if (right <= left || bottom <= top || Math.min(right, view.x + view.width) <= Math.max(left, view.x) || Math.min(bottom, view.y + view.height) <= Math.max(top, view.y)) return;
     const policy = assessPlanPolicy({ intent: goal.id, isSensitive: goal.spec.isSensitive, actions: [{ type: 'OPEN_APP', app: goal.spec.app }, action] });
     const genericRead = action.type === 'CLICK' && semanticRole === 'read_navigation' && nativeReadControl(goal, snapshot, node);
+    const routeRead = semanticRole === 'capability_navigation' && capabilityRouteNodes(goal, snapshot).some(route => route.index === index && route.kind === verification.label) &&
+      (action.type === 'PRESS_KEY' && action.key === 'BACK' && verification.label === 'MEDIA_BACK' || action.type === 'CLICK' && assessObservedRouteControl(snapshot, node).decision === 'ALLOW');
     const observedRead = isReadLocationGoal(goal) && ['search_navigation', 'read_navigation'].includes(semanticRole) &&
       action.type === 'CLICK' && observedTarget(snapshot, node) === action.target && safeNavigationOwner(snapshot, node) &&
       (semanticRole === 'search_navigation' ? searchControl(snapshot) === node : readNavigationLabel(goal, node)) &&
       assessObservedReadNavigation(snapshot, node, goal.spec.targetText ?? '', semanticRole === 'search_navigation').decision === 'ALLOW';
-    if (policy.decision !== 'ALLOW' && !observedRead && !genericRead && !(genericNativeGoal(goal) && nativeContextSafe(goal, snapshot) && action.type === 'SWIPE')) return;
+    if (policy.decision !== 'ALLOW' && !observedRead && !genericRead && !routeRead && !(genericNativeGoal(goal) && nativeContextSafe(goal, snapshot) && action.type === 'SWIPE')) return;
     const candidateId = 'candidate_' + createHash('sha256').update(`${snapshot.snapshotId}:${subgoal.id}:${JSON.stringify(action)}:${index}`).digest('hex').slice(0, 12);
     candidates.push(ActionCandidateSchema.parse({ candidateId, snapshotId: snapshot.snapshotId, subgoalId: subgoal.id, fingerprint,
       action, semanticRole, description, expectedOutcome, targetElementId: element.elementId, anchorResourceId: node.resourceId, layers,
       evidence: { enabled: true, visible: true, policy: 'ALLOW' }, preconditions: { packageName: snapshot.foregroundPackage, uniqueTarget: true, noUnsavedInput: true, goalScope: true },
       safety: 'READ_NAVIGATION', verification,
-      goalRelation: semanticRole === 'search_navigation' ? 'SEARCH_ROUTE' : semanticRole === 'scroll_discovery' ? 'DISCOVERY_ROUTE' : semanticRole === 'reversible_navigation' ? 'REVERSIBLE_ROUTE' :
+      ...(semanticRole === 'capability_navigation' ? { routeContext: {
+        deviceId: snapshot.deviceSerial, activity: snapshot.activity ?? '', screenType: understandCurrentScreen(snapshot, goal.id).screenType,
+        capability: resolveRequiredCapability(goal, snapshot).name, viewport: [view.x, view.y, view.width, view.height], bounds: [...node.bounds],
+        className: node.className, label: verification.label === 'MEDIA_BACK' ? '' : node.description || node.text,
+      } } : {}),
+      goalRelation: semanticRole === 'search_navigation' ? 'SEARCH_ROUTE' : semanticRole === 'scroll_discovery' ? 'DISCOVERY_ROUTE' : ['reversible_navigation', 'capability_navigation'].includes(semanticRole) ? 'REVERSIBLE_ROUTE' :
         semanticRole === 'read_navigation' ? /^(bo nho|luu tru|dung luong luu tru|memory|storage)$/.test(normalizeUiText(node.text || node.description)) ? 'DIRECT_INFORMATION' : 'INFORMATION_CATEGORY' : 'GOAL_CONTROL' }));
   };
   const layers = navigationLayers(snapshot);
+  for (const route of capabilityRouteNodes(goal, snapshot)) {
+    const target = observedTarget(snapshot, snapshot.nodes[route.index]);
+    if (route.kind !== 'MEDIA_BACK' && !target) continue;
+    add(route.index, route.kind === 'MEDIA_BACK' ? { type: 'PRESS_KEY', key: 'BACK' } : { type: 'CLICK', target: target! },
+      'capability_navigation', `Observed ${route.kind} route toward ${resolveRequiredCapability(goal, snapshot).name}.`,
+      'Verify the required capability or a recognized intermediate navigation destination in the same app.', [], { kind: 'CAPABILITY_ROUTE', label: route.kind });
+  }
+  if (candidates.length) return candidates.slice(0, 6);
   if (genericNativeGoal(goal)) {
     if (!nativeContextSafe(goal, snapshot)) return [];
     snapshot.nodes.forEach((node, index) => {
@@ -129,9 +147,11 @@ export function resolveCandidateChoice(candidates: ActionCandidate[], choice: un
 }
 
 export function revalidateCandidate(candidate: ActionCandidate, goal: AgentGoal, fresh: Observation): boolean {
+  const contextualRoute = candidate.semanticRole === 'capability_navigation' && Boolean(candidate.routeContext);
   if (candidate.subgoalId !== goal.subgoals[goal.currentSubgoal]?.id || Date.now() - fresh.timestamp < 0 || Date.now() - fresh.timestamp > 5000 ||
-    candidate.fingerprint !== geometryFingerprint(fresh)) return false;
+    !contextualRoute && candidate.fingerprint !== geometryFingerprint(fresh)) return false;
   return generateActionCandidates(goal, fresh).some(row => row.semanticRole === candidate.semanticRole && row.anchorResourceId === candidate.anchorResourceId &&
     JSON.stringify(row.action) === JSON.stringify(candidate.action) && JSON.stringify(row.layers) === JSON.stringify(candidate.layers) &&
+    JSON.stringify(row.routeContext) === JSON.stringify(candidate.routeContext) &&
     row.goalRelation === candidate.goalRelation && JSON.stringify(row.verification) === JSON.stringify(candidate.verification) && JSON.stringify(row.preconditions) === JSON.stringify(candidate.preconditions));
 }

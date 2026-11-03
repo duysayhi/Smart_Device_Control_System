@@ -34,7 +34,7 @@ interface Pending { summary: VisualSummary; snapshot: Observation; node: UiNode;
 const hash = (value: string | Buffer) => createHash('sha256').update(value).digest('hex');
 export function geometryFingerprint(s: Observation): string {
   return hash(JSON.stringify([s.deviceSerial, s.foregroundPackage, s.activity, s.observationStatus, s.viewport,
-    s.nodes.map(n => [n.resourceId, n.className, n.packageName, n.text, n.description, n.bounds, n.parentIndex, n.enabled, n.displayed, n.clickable, n.focused, n.selected])]));
+    s.nodes.map(n => [n.resourceId, n.className, n.packageName, n.text, n.description, n.bounds, n.parentIndex, n.enabled, n.displayed, n.clickable, n.focused, n.selected, n.checkable, n.checked, n.hint])]));
 }
 function equal(a: unknown, b: unknown): boolean { return JSON.stringify(a) === JSON.stringify(b); }
 export function validBounds(b: Bounds): boolean { return b.length === 4 && b.every(Number.isFinite) && b[2] > b[0] && b[3] > b[1]; }

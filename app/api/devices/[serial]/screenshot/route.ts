@@ -1,5 +1,7 @@
-import { isValidAndroidSerial, listAndroidDevices } from '@/lib/android/adb';
+import { isValidAndroidSerial, listAndroidDevices, runAdb } from '@/lib/android/adb';
 import { androidPreview } from '@/lib/android/screen-previews';
+import { readTransportIdentity } from '@/lib/android/transport-identity';
+import { wirelessIdentityAllowed } from '@/lib/android/wireless-store';
 
 export async function GET(
   request: Request,
@@ -22,7 +24,14 @@ export async function GET(
       );
     }
 
+    const wirelessIdentity = device.connectionType === 'Wi-Fi' ? await readTransportIdentity(runAdb, serial, true) : undefined;
+    if (device.connectionType === 'Wi-Fi' && (!wirelessIdentity || !await wirelessIdentityAllowed(serial, wirelessIdentity.physicalId))) {
+      return Response.json({ error: 'Wireless identity is unverified or changed. Screenshot refused.' }, { status: 409 });
+    }
     const screenshot = await androidPreview(serial, width);
+    if (wirelessIdentity && (await readTransportIdentity(runAdb, serial, true))?.physicalId !== wirelessIdentity.physicalId) {
+      return Response.json({ error: 'Physical identity changed while capturing preview. Image discarded.' }, { status: 409 });
+    }
     return new Response(new Uint8Array(screenshot), {
       headers: {
         'Cache-Control': 'no-store, no-cache, must-revalidate',

@@ -4,6 +4,7 @@ import type { DiscoveredSelection } from '../exploration/types';
 import type { Observation } from '../state-observer';
 import { geometryFingerprint } from '../visual-grounding';
 import { navigationLayers } from '../browser-navigation';
+import type { CurrentScreenState } from './navigation-semantics';
 
 export interface AgentActionRecord { action: Action; fingerprint: string; subgoalId: string; verification: 'VERIFIED' | 'SENT' | 'FAILED'; error?: string; reason: string; candidateId?: string; candidateSnapshotId?: string; recoverySubtaskId?: string }
 export class AgentMemory {
@@ -11,6 +12,12 @@ export class AgentMemory {
   readonly observations: { fingerprint: string; screen: string; packageName: string; nodeCount: number; hadDialog: boolean; navigationLayers: string[] }[] = [];
   readonly reasoningStates = new Set<string>();
   recovery?: import('./recovery').RecoveryProgress;
+  readonly screenStates: CurrentScreenState[] = [];
+  readonly navigation: { from: string; to?: string; action: Action; verification: 'VERIFIED' | 'SENT' | 'FAILED'; capability: string; elapsedMs: number }[] = [];
+  recordScreen(state: CurrentScreenState) {
+    this.screenStates.push(state);
+    if (this.screenStates.length > 12) this.screenStates.shift();
+  }
   selection?: DiscoveredSelection;
   lastOutcome?: ActionOutcome;
   failures: { code: string; action?: Action; message?: string }[] = [];

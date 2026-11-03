@@ -113,7 +113,7 @@ export const DeviceGrid: React.FC<DeviceGridProps> = ({
           </h4>
           <p className="text-xs text-slate-400 mt-1 max-w-sm">
             {devices.length === 0
-              ? 'Kết nối điện thoại Android qua USB và làm mới danh sách thiết bị.'
+              ? 'Kết nối Android qua USB hoặc Wi-Fi trong Quản lý kết nối thiết bị.'
               : 'Vui lòng thử bỏ bộ lọc nền tảng hoặc trạng thái để hiển thị danh sách thiết bị đầy đủ.'}
           </p>
           <button

@@ -7,6 +7,7 @@ export const UiElementSchema = z.object({
   clickable: z.boolean().optional(), enabled: z.boolean().optional(),
   focusable: z.boolean().optional(), focused: z.boolean().optional(),
   scrollable: z.boolean().optional(), selected: z.boolean().optional(), visible: z.boolean().optional(),
+  checkable: z.boolean().optional(), checked: z.boolean().optional(),
   parentElementId: z.string().optional(),
 });
 export const ScreenSnapshotSchema = z.object({

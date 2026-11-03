@@ -1,14 +1,19 @@
 import { randomUUID } from 'node:crypto';
 import { GoalSpecSchema, GoalSchema, type AgentGoal, type GoalSpec, type Criterion } from './schema';
-import { resolveAppPackage, APP_PACKAGE_ALIASES } from '../capabilities';
+import { resolveAppPackage, APP_PACKAGE_ALIASES, parseChromeRequest } from '../capabilities';
 import { isSensitiveControl, assessPlanPolicy } from '../security-policy';
 import { normalizeUiText } from '../ui-understanding';
 import { AgentBudget } from './budget';
 import { OllamaAgentReasoner, type JsonReasoner } from './ollama';
 import { AndroidExecutionError } from '../errors';
 import { bindDiscoveredApplication, isVerifiedApplication, type DiscoveredApplication } from './application-discovery';
+import { assertLegacyCoverage, legacyActionWords } from './outcome-spec';
+import { assertSafeSource } from '../safety-envelope';
 
-function clearGoal(request: string): GoalSpec | undefined {
+export function clearGoal(request: string): GoalSpec | undefined {
+  const chrome = parseChromeRequest(request);
+  if (chrome?.query) return { app: 'chrome', operation: chrome.ordinal ? 'OPEN_RESULT' : 'SEARCH', query: chrome.query,
+    resultType: 'browser', ...(chrome.ordinal ? { ordinal: chrome.ordinal } : {}), isSensitive: false };
   const read = request.match(/^mở\s+(settings|cài đặt)\s+và\s+xem\s+(.+?)\.?$/i);
   if (read) return { app: 'settings', operation: 'FIND_PLACE', targetText: read[2], isSensitive: false };
   const implicit = request.match(/^tìm(?:\s+kiếm)?\s+(.+?)\s+(?:và|rồi)\s+(mở|phát)\s+(bài(?:\s+hướng dẫn)?|kết quả|video(?:\s+thông thường)?)\s+(đầu tiên|thứ hai|thứ ba|thứ tư|thứ\s+\d+)(?:\s+phù hợp)?\.?$/i);
@@ -38,12 +43,13 @@ export function buildGoal(request: string, candidate: GoalSpec, budget: AgentBud
   const packageName = application?.packageName ?? resolveAppPackage(parsed.app);
   const spec = { ...parsed, app: Object.entries(APP_PACKAGE_ALIASES).find(([, value]) => value === packageName)?.[0] ?? (application ? packageName : parsed.app) };
   const original = normalizeUiText(request);
+  const actionWords = legacyActionWords(request, application?.requestedName ?? parsed.app, [spec.query ?? '', spec.targetText ?? '']);
   if (application && !Object.values(APP_PACKAGE_ALIASES).includes(packageName) && !original.includes(normalizeUiText(application.requestedName))) throw new Error('Planner changed the requested application.');
+  assertLegacyCoverage(request, spec.operation, application?.requestedName ?? parsed.app);
   if (application && ['OPEN_APP', 'OPEN_PAGE', 'FIND_ELEMENT'].includes(spec.operation) &&
-    /\b(chup|screenshot|gui|send|xoa|delete|thanh toan|payment|purchase|reset|uninstall|tao|them)\b/.test(original)) throw new Error('Capture, send, create and data-changing outcomes are not supported by native read navigation.');
+    /\b(chup|screenshot|gui|send|xoa|delete|thanh toan|payment|purchase|reset|uninstall|tao|them)\b/.test(actionWords)) throw new Error('Capture, send, create and data-changing outcomes are not supported by native read navigation.');
   if (spec.operation === 'FIND_PLACE' && /\bva xem\b/.test(original) && /\bbo nho\b/.test(original) && !/\b(luu tru|storage|ram)\b/.test(original)) throw new AndroidExecutionError('CONFIG_ERROR', 'Cần làm rõ: bạn muốn xem RAM hay dung lượng lưu trữ?');
   if (spec.operation === 'FIND_PLACE' && !/\b(tim noi xem|va xem)\b/.test(original)) throw new Error('Planner invented an information-location outcome.');
-  const actionWords = spec.query ? original.replace(normalizeUiText(spec.query), '') : spec.targetText ? original.replace(normalizeUiText(spec.targetText), '') : original;
   if (/\b(tat|dong|close|thay doi|doi|bat|toggle|chup|screenshot|gui|send|download|tai ve|share|chia se)\b/.test(actionWords)) throw new Error('Requested outcomes are outside the supported read/navigation goal types.');
   if (spec.operation === 'OPEN_RESULT' && (!/\b(tim|search|tra cuu)\b/.test(original) || !/\b(mo|phat|chon|xem|open|play|select)\s+(ket qua|video|bai|result)\b/.test(original))) throw new Error('Planner invented a search/selection outcome.');
   if (spec.operation === 'SEARCH' && (/\b(mo|phat|chon|xem|open|play|select)\s+(ket qua|video|bai|result)\b/.test(original) || !/\b(tim|search|tra cuu)\b/.test(original))) throw new Error('Search-only planning cannot drop a requested selection or invent a search.');
@@ -70,14 +76,15 @@ export function buildGoal(request: string, candidate: GoalSpec, budget: AgentBud
   const goal = GoalSchema.parse({ id: randomUUID(), originalRequest: request, description: request, spec, packageName,
     currentSubgoal: 0, subgoals: criteria.map((criterion, i) => ({ id: `subgoal-${i}`, description: criterion.kind === 'FOREGROUND' ? `Mở ${spec.app}` :
       criterion.kind === 'SEARCH_RESULTS' ? `Xác minh kết quả: ${spec.query}` : criterion.kind === 'NATIVE_PAGE' ? `Mở trang ${spec.targetText}` : ['TARGET_VISIBLE', 'READ_LOCATION'].includes(criterion.kind) ? `Tìm ${spec.targetText}` : `Xác minh nội dung thứ ${spec.ordinal}`, criterion, status: 'PENDING' })),
-    allowedActionScope: ['OPEN_APP', 'WAIT_FOR', 'PRESS_KEY', ...(['SEARCH', 'OPEN_RESULT', 'FIND_PLACE'].includes(spec.operation) ? ['CLICK', 'INPUT_TEXT'] : spec.operation === 'OPEN_PAGE' ? ['CLICK'] : []), ...(['FIND_PLACE', 'FIND_ELEMENT', 'OPEN_PAGE'].includes(spec.operation) ? ['SWIPE'] : [])],
+    allowedActionScope: ['OPEN_APP', 'WAIT_FOR', 'PRESS_KEY', ...(['SEARCH', 'OPEN_RESULT', 'FIND_PLACE'].includes(spec.operation) ? ['CLICK', 'INPUT_TEXT'] : ['OPEN_PAGE', 'FIND_ELEMENT'].includes(spec.operation) ? ['CLICK'] : []), ...(['FIND_PLACE', 'FIND_ELEMENT', 'OPEN_PAGE'].includes(spec.operation) ? ['SWIPE'] : [])],
     limits: budget.limits, safetyRequirements: ['Independent policy ALLOW', 'Fresh native/DOM validation', 'No sensitive actions', 'Verified goal criteria', 'No screenshot AI without an approved Vision adapter'] });
   if (application) bindDiscoveredApplication(goal, application);
   return goal;
 }
 export async function planGoal(request: string, budget: AgentBudget, reasoner: JsonReasoner = new OllamaAgentReasoner(), signal?: AbortSignal,
   discover?: (app: string) => Promise<DiscoveredApplication>) {
-  request = request.trim();
+    request = request.trim();
+    assertSafeSource(request);
   if (!request || request.length > 2000 || isSensitiveControl(request)) throw new Error('Invalid or sensitive goal; explicit authorization is required.');
   const generic = discover && request.match(/^mở\s+(?:ứng dụng\s+)?([^,]+?)(?:\s+và\s+(tìm(?:\s+mục)?|mở(?:\s+trang)?|xem)\s+(.+?))?\.?$/i);
   const genericSpec: GoalSpec | undefined = generic && !/\b(?:va|roi|and|then)\b/.test(normalizeUiText(generic[1])) ? {

@@ -3,18 +3,24 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "next dev",
+    "dev": "node scripts/dev-services.cjs",
+    "dev:web": "next dev",
     "agent:worker": "node scripts/agent-worker.cjs",
     "agent:worker:stop": "node scripts/agent-worker.cjs --stop",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "test:integration": "node scripts/test-integration.cjs",
+    "test:teach": "node scripts/test-integration.cjs --teach",
+    "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@simplewebauthn/server": "13.2.2",
     "clsx": "^2.1.1",
     "fast-xml-parser": "^5.11.2",
     "lucide-react": "^1.16.0",
     "next": "16.4.0",
+    "pg": "8.16.3",
     "react": "19.3.0",
     "react-dom": "19.3.0",
     "sharp": "0.35.5",
@@ -22,8 +28,10 @@
     "zod": "^4.6.5"
   },
   "devDependencies": {
+    "@electric-sql/pglite": "0.3.10",
     "@tailwindcss/turbopack": "^4",
     "@types/node": "^20",
+    "@types/pg": "8.15.5",
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "eslint": "^9",

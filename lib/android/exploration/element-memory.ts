@@ -4,6 +4,7 @@ import type { UiNode } from '../targets';
 import { normalizeUiText, canonicalUiText, findBrowserResultNodes, browserResultUrl } from '../ui-understanding';
 import { isDescendant, clippedBounds, type ScrollRegion } from './scroll-regions';
 import type { ExplorationGoal } from './types';
+import { videoSeconds } from '../video-metadata';
 
 export interface DiscoveryCandidate {
   node: UiNode; identity: string; title: string; itemType: 'video' | 'browser' | 'list'; url?: string;
@@ -19,18 +20,27 @@ const adLabel = (text: string) => /^(ad|ads|sponsored|advertisement|quang cao|du
 
 export function videoResultTitle(description: string): string | undefined {
   const parts = description.split(/\s[-\u2013\u2014]\s/);
-  const duration = parts.findIndex(part => /^(?:\d[\d\s,:.]*\s*(?:phut|giay|gio|minutes?|seconds?|hours?)|\d{1,2}:\d{2}(?::\d{2})?|live|truc tiep|dang phat truc tiep)(?:\b|$)/.test(normalizeUiText(part)));
+  const duration = parts.findIndex((part, index) => index > 0 && (videoSeconds(part) !== undefined || /^(?:live|truc tiep|dang phat truc tiep)$/.test(normalizeUiText(part))));
   const separators = [...description.matchAll(/\s[-\u2013\u2014]\s/g)];
   return duration > 0 && separators[duration - 1] ? description.slice(0, separators[duration - 1].index).trim() : undefined;
+}
+// Accessibility can announce the same channel twice: navigation label and
+// verified-badge label. Only agreeing identities may be merged.
+export function videoChannelEvidence(description: string): { channel?: string; ambiguous: boolean } {
+  const parts = description.split(/\s[-–—]\s/).filter(p => /^(?:kenh|channel|go to channel|chuyen den kenh)\s/.test(normalizeUiText(p)));
+  const names = parts.map(p => p.replace(/^(?:channel|kênh|kenh|go to channel|chuyển đến kênh|chuyen den kenh)\s+/i, '')
+    .replace(/,\s*(?:đã xác minh|da xac minh|verified|official artist channel|kênh nghệ sĩ chính thức)$/i, '').trim());
+  const unique = [...new Set(names.map(canonicalUiText))];
+  return { channel: unique.length === 1 && unique[0] ? unique[0] : undefined, ambiguous: unique.length > 1 || names.some(n => !n) };
 }
 export function videoIdentityEvidence(description: string): string {
   const title = videoResultTitle(description);
   const parts = description.split(/\s[-\u2013\u2014]\s/);
-  const duration = parts.find(part => /^(?:\d[\d\s,:.]*\s*(?:phut|giay|gio|minutes?|seconds?|hours?)|\d{1,2}:\d{2}(?::\d{2})?|live|truc tiep)(?:\b|$)/.test(normalizeUiText(part)));
-  const channels = parts.filter(part => /^(?:kenh|channel|go to channel|chuyen den kenh)\s/.test(normalizeUiText(part)));
+  const duration = parts.find((part, index) => index > 0 && (videoSeconds(part) !== undefined || /^(?:live|truc tiep)$/.test(normalizeUiText(part))));
+  const channel = videoChannelEvidence(description);
   // Only ignore volatile view/date fields when an explicit channel and duration
   // identify the same content. Unknown layouts retain exact-description identity.
-  return title && duration && channels.length === 1 ? JSON.stringify([canonicalUiText(title), canonicalUiText(duration), canonicalUiText(channels[0])]) : canonicalUiText(description);
+  return title && duration && channel.channel && !channel.ambiguous ? JSON.stringify([canonicalUiText(title), canonicalUiText(duration), channel.channel]) : canonicalUiText(description);
 }
 
 export function discoveryCandidates(snapshot: Observation, region: ScrollRegion, goal: ExplorationGoal): { status: 'OBSERVED' | 'AMBIGUOUS'; candidates: DiscoveryCandidate[]; reason?: string } {
@@ -89,6 +99,8 @@ export function discoveryCandidates(snapshot: Observation, region: ScrollRegion,
       if (parent === -1) continue;
     }
     if (inRegion.some(n => /:id\/.*shorts/.test(n.resourceId) && isDescendant(snapshot.nodes, node, n))) continue;
+    if (goal.itemType === 'video' && (node.description.split(/\s[-–—]\s/).some(p => /^(?:live|live now|truc tiep|dang phat truc tiep)$/.test(normalizeUiText(p))) ||
+      /(?:^|[_:/])(?:playlist|radio_mix|channel_card|miniplayer)(?:$|[_/])/.test(node.resourceId))) continue;
     if (adLabel(node.description) || adLabel(node.text) || inRegion.some(n => adLabel(n.text || n.description) && isDescendant(snapshot.nodes, n, node))) continue;
     // Only associate an ad marker with a containing group if it does not group multiple results.
     let parent = node.parentIndex;

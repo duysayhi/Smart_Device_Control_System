@@ -13,6 +13,9 @@ import { isDescendant } from './exploration/scroll-regions';
 import type { ExplorationMetrics } from './exploration/types';
 import { resolveInteractionTarget } from './interaction-target-resolver';
 import { HybridContextObserver, withSessionContextLock, matchesNativeAddress, type HybridObservation } from './hybrid-context-observer';
+import type { MediaPlaybackEvidence } from './media-playback-verifier';
+import { exclusiveActivationPoint } from './activation-point';
+import { readKeyboardVisibility } from './agent/keyboard-visibility';
 
 export interface Observation extends ScreenSnapshot {
   observedAt: string;
@@ -22,17 +25,20 @@ export interface Observation extends ScreenSnapshot {
   nodes: UiNode[];
   viewport: Viewport;
   web?: HybridObservation;
+  playback?: MediaPlaybackEvidence;
 }
 export interface ObservationEvidence {
   observedAt: string; source: 'APPIUM' | 'ADB'; foregroundPackage?: string;
   screen?: AndroidScreenState; nodeCount?: number;
   snapshotId?: string; observationStatus?: ScreenSnapshot['observationStatus']; deviceSerial?: string;
   webStatus?: HybridObservation['status']; webContext?: string; webReason?: string; domSource?: 'WEB_CONTEXT';
+  playback?: MediaPlaybackEvidence;
 }
 export const observationEvidence = (snapshot: Observation): ObservationEvidence => ({
   observedAt: snapshot.observedAt, source: snapshot.source, foregroundPackage: snapshot.foregroundPackage,
   screen: snapshot.screen, nodeCount: snapshot.nodes.length,
   snapshotId: snapshot.snapshotId, observationStatus: snapshot.observationStatus, deviceSerial: snapshot.deviceSerial,
+  ...(snapshot.playback ? { playback: snapshot.playback } : {}),
   ...(snapshot.web ? { webStatus: snapshot.web.status, ...(snapshot.web.status === 'DOM_AVAILABLE'
     ? { webContext: snapshot.web.context, domSource: 'WEB_CONTEXT' as const } : { webReason: snapshot.web.reason }) } : {}),
 });
@@ -40,7 +46,7 @@ export interface ObserverProgress { waitingFor: string; elapsedMs: number; evide
 export interface LocatedElement {
   id: string; node: UiNode; snapshot: Observation;
   owner?: UiNode;
-  interaction?: { method: 'ELEMENT_CLICK' | 'LABEL_GESTURE'; ownerId?: string; point?: { x: number; y: number }; evidence: string[] };
+  interaction?: { method: 'ELEMENT_CLICK' | 'LABEL_GESTURE' | 'EXCLUSIVE_POINT'; ownerId?: string; point?: { x: number; y: number }; evidence: string[] };
 }
 
 export function xpathLiteral(value: string): string {
@@ -57,7 +63,7 @@ export function selectorForNode(node: UiNode, nodes: UiNode[]): AppiumSelector {
   }
   const [left, top, right, bottom] = node.bounds;
   const bounds = `[${left},${top}][${right},${bottom}]`;
-  return { using: 'xpath', value: `//*[@package=${xpathLiteral(node.packageName)} and @class=${xpathLiteral(node.className)} and @bounds=${xpathLiteral(bounds)}${node.description ? ` and @content-desc=${xpathLiteral(node.description)}` : ''}${node.text ? ` and @text=${xpathLiteral(node.text)}` : ''}${node.resourceId ? ` and @resource-id=${xpathLiteral(node.resourceId)}` : ''}]` };
+  return { using: 'xpath', value: `//*[@package=${xpathLiteral(node.packageName)} and @class=${xpathLiteral(node.className)} and @bounds=${xpathLiteral(bounds)} and @clickable=${xpathLiteral(String(node.clickable))}${node.description ? ` and @content-desc=${xpathLiteral(node.description)}` : ''}${node.text ? ` and @text=${xpathLiteral(node.text)}` : ''}${node.resourceId ? ` and @resource-id=${xpathLiteral(node.resourceId)}` : ''}]` };
 }
 
 export async function waitForObservation<T>(read: (remainingMs: number) => Promise<Observation>, condition: (snapshot: Observation, remainingMs: number) => Promise<T | false> | T | false,
@@ -86,7 +92,7 @@ export async function waitForObservation<T>(read: (remainingMs: number) => Promi
 export class StateObserver {
   readonly hybrid: HybridContextObserver;
   constructor(private readonly session: ManagedAppiumSession, private readonly run: AdbRunner,
-    private readonly accounting?: { beforeSnapshot?: (source?: string) => void; beforeScroll?: () => void; onObservation?: (ms: number) => void }) { this.hybrid = new HybridContextObserver(session, accounting); }
+    private readonly accounting?: { beforeSnapshot?: (source?: string) => void; beforeScroll?: () => void; onObservation?: (ms: number) => void; onParse?: (ms: number) => void }) { this.hybrid = new HybridContextObserver(session, accounting); }
   private get client(): AppiumClient { return this.session.client; }
   async read(timeoutMs = 15000, signal?: AbortSignal): Promise<Observation> {
     return withSessionContextLock(this.session, () => this.readNative(timeoutMs, signal));
@@ -105,6 +111,7 @@ export class StateObserver {
     const deadline = performance.now() + timeoutMs;
     const remaining = () => Math.max(1, deadline - performance.now());
     await assertDeviceConnected(this.run, this.session.serial, remaining());
+    await this.session.assertPhysicalIdentity?.(signal, remaining());
     await this.hybrid.ensureNative(remaining(), signal);
     checkCancellation(signal);
     const foregroundPackage = await this.client.request<string>('GET', this.session.path + '/appium/device/current_package', undefined, remaining(), signal);
@@ -117,8 +124,10 @@ export class StateObserver {
       if (!(error instanceof AndroidExecutionError && error.code === 'BACKEND_ERROR' && /unknown command/.test(error.message))) throw error;
     }
     let nodes: UiNode[];
+    const parseStarted = performance.now();
     try { nodes = parseUiHierarchy(xml); }
     catch (error) { throw new AndroidExecutionError('BACKEND_ERROR', 'Appium returned an invalid UI hierarchy.', { cause: error }); }
+    finally { try { this.accounting?.onParse?.(performance.now() - parseStarted); } catch { /* Diagnostics do not invalidate a successful observation. */ } }
     const confirmedPackage = await this.client.request<string>('GET', this.session.path + '/appium/device/current_package', undefined, remaining(), signal);
     const screen = confirmedPackage === foregroundPackage ? classifyScreen(foregroundPackage, nodes) : 'UNKNOWN';
     const snapshotId = randomUUID();
@@ -132,6 +141,7 @@ export class StateObserver {
         clickable: attributes(node, 'clickable', node.clickable), enabled: attributes(node, 'enabled', node.enabled),
         focused: attributes(node, 'focused', node.focused), visible: attributes(node, 'displayed', node.displayed),
         focusable: node.focusable, scrollable: node.scrollable, selected: node.selected,
+        checkable: attributes(node, 'checkable', node.checkable), checked: attributes(node, 'checked', node.checked),
         parentElementId: node.parentIndex === undefined ? undefined : `${snapshotId}:${node.parentIndex}`,
       })),
     });
@@ -147,11 +157,25 @@ export class StateObserver {
     }
     const finalPackage = web ? await this.client.request<string>('GET', this.session.path + '/appium/device/current_package', undefined, remaining(), signal) : confirmedPackage;
     const consistent = finalPackage === foregroundPackage;
+    await this.session.assertPhysicalIdentity?.(signal, remaining());
     return { ...structured, observationStatus: consistent ? structured.observationStatus : 'UNKNOWN', observedAt: new Date(structured.timestamp).toISOString(),
       source: 'APPIUM', screen: consistent ? screen : 'UNKNOWN', nodes, viewport, ...(web && consistent ? { web } : {}) };
   }
   async locate(snapshot: Observation, target: string, forClick: boolean, timeoutMs: number, signal?: AbortSignal): Promise<LocatedElement | false> {
     return withSessionContextLock(this.session, () => this.locateNative(snapshot, target, forClick, timeoutMs, signal));
+  }
+  keyboardVisibility(signal?: AbortSignal) { return readKeyboardVisibility(this.session.serial, this.run, signal); }
+  async locateSearchActivation(snapshot: Observation, target: string, timeoutMs: number, signal?: AbortSignal): Promise<LocatedElement | false> {
+    return withSessionContextLock(this.session, async () => {
+      const found = await this.locateNative(snapshot, target, false, timeoutMs, signal);
+      if (!found) return false;
+      const path = this.session.path + '/element/' + encodeURIComponent(found.id);
+      if (await this.client.request('GET', path + '/attribute/clickable', undefined, timeoutMs, signal) !== 'true') return false;
+      const rect = await this.client.request<Viewport>('GET', path + '/rect', undefined, timeoutMs, signal);
+      if ([rect.x, rect.y, rect.x + rect.width, rect.y + rect.height].join() !== found.node.bounds.join()) return false;
+      const point = exclusiveActivationPoint(snapshot, found.node);
+      return point ? { ...found, interaction: { method: 'EXCLUSIVE_POINT', point, evidence: ['fresh native hierarchy', 'unique displayed enabled native target', 'independent native rect equality', 'no other clickable control at point'] } } : false;
+    });
   }
   private async locateNative(snapshot: Observation, target: string, forClick: boolean, timeoutMs: number, signal?: AbortSignal): Promise<LocatedElement | false> {
     if (snapshot.deviceSerial !== this.session.serial || Date.now() - snapshot.timestamp > 5000) throw new AndroidExecutionError('UNKNOWN', 'Snapshot is stale or belongs to another device. Observe again.');
@@ -228,7 +252,7 @@ export class StateObserver {
     const index = fresh.nodes.indexOf(candidates[0]);
     return this.locate(fresh, `element:${fresh.elements[index].elementId}`, true, Math.max(1, timeoutMs - (performance.now() - started)), signal);
   }
-  waitUntil<T>(condition: (snapshot: Observation) => T | false, target: string, timeoutMs: number, signal?: AbortSignal, onProgress?: (value: ObserverProgress) => void): Promise<T> {
+  waitUntil<T>(condition: (snapshot: Observation, remainingMs: number) => T | false | Promise<T | false>, target: string, timeoutMs: number, signal?: AbortSignal, onProgress?: (value: ObserverProgress) => void): Promise<T> {
     return waitForObservation((remaining) => this.read(remaining, signal), condition, target, timeoutMs, signal, onProgress);
   }
   waitFor(target: string, timeoutMs: number, signal?: AbortSignal, onProgress?: (value: ObserverProgress) => void, forClick = false): Promise<LocatedElement> {

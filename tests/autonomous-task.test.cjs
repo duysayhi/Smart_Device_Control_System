@@ -112,6 +112,7 @@ test('paused activation resumes the original execution and still independently v
   const scene = (nodes, screen) => ({ snapshotId: randomUUID(), timestamp: Date.now(), foregroundPackage: pkg, observationStatus: 'OBSERVED', screen, viewport: { x: 0, y: 0, width: 400, height: 800 }, nodes, elements: [] });
   const before = scene([node({ resourceId: pkg + ':id/search_query', text: goal.spec.query })], 'SEARCH_RESULTS');
   const after = scene([node({ resourceId: pkg + ':id/watch_player' }), node({ resourceId: pkg + ':id/video_metadata_layout' }), node({ text: 'Selected public podcast', parentIndex: 1 })], 'VIDEO_PLAYER');
+  after.playback = { source: 'ADB_MEDIA_SESSION', packageName: pkg, title: 'Selected public podcast', positionMs: 2000, previousPositionMs: 1000 };
   const execution = { backend: 'appium', async observe() { return before; }, discoveryMemory() { return {}; }, verificationSnapshot() { return after; },
     async execute() { const e = new AndroidExecutionError('AMBIGUOUS', 'Confirm activation region'); e.visual = v; throw e; },
     async confirmVisualTap(choice) { taps++; assert.equal(choice.evidenceId, v.id); return { verification: 'VERIFIED', selection: { ordinal: 2, itemType: 'video', title: 'Selected public podcast', identity: 'actual' } }; },

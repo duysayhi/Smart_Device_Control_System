@@ -5,6 +5,9 @@ import type { Observation } from './state-observer';
 import { isDescendant } from './exploration/scroll-regions';
 import { AndroidExecutionError } from './errors';
 import { APP_PACKAGE_ALIASES } from './capabilities';
+import { isWifiOffPlan, isWifiOnPlan, wifiNetworkForPlan } from './wifi-plan';
+import { developmentPolicyEnabled } from './policy-mode';
+import { forbiddenControl } from './safety-envelope';
 
 export type ActionRisk = 'NAVIGATION' | 'READ' | 'DATA_CHANGE' | 'SENSITIVE' | 'UNKNOWN';
 export interface PolicyDecision {
@@ -13,9 +16,13 @@ export interface PolicyDecision {
   reasons: string[];
   llmDisagreement: boolean;
 }
-export function isSensitiveControl(value: string): boolean {
+export function isDestructiveControl(value: string): boolean {
+  return forbiddenControl(value) || /(?:^|[\s/:.])(delete|xoa|reset|factory reset|uninstall|go cai dat|khoi phuc cai dat goc|dat lai thiet bi|erase|wipe|format|clear data|clear cache|don dep|don ngay|clean now)(?:$|\s|button)/.test(normalizeUiText(value));
+}
+export function isSensitiveControl(value: string, strict = false): boolean {
+  if (developmentPolicyEnabled() && !strict) return isDestructiveControl(value);
   const normalized = normalizeUiText(value);
-  return /(?:^|[\s/:.])(subscribe|subscribed|like|comment|delete|send|purchase|payment|login|sign in|dang ky|dang nhap|thanh toan|mua hang|xoa|don dep|don ngay|clean now|optimize now|toi uu ngay|reset|factory reset|uninstall|format|clear data|clear cache)(?:$|\s|button)/.test(normalized);
+  return /(?:^|[\s/:.])(subscribe|subscribed|like|comment|delete|send|purchase|payment|login|sign in|dang ky|dang nhap|thanh toan|mua hang|xoa|don dep|don ngay|clean now|optimize now|toi uu ngay|reset|factory reset|uninstall|go cai dat|khoi phuc cai dat goc|dat lai thiet bi|erase|wipe|format|clear data|clear cache)(?:$|\s|button)/.test(normalized);
 }
 export function unsafeBrowserInput(text: string): boolean {
   const compact = text.trim().replace(/[\u0000-\u0020]/g, '');
@@ -24,7 +31,14 @@ export function unsafeBrowserInput(text: string): boolean {
   try { return isSensitiveControl(new URL(text.trim()).pathname); }
   catch { return true; }
 }
-export function assessPlanPolicy(plan: ActionPlan): PolicyDecision {
+export function assessPlanPolicy(plan: ActionPlan, strict = false): PolicyDecision {
+  if (developmentPolicyEnabled() && !strict) {
+    const destructive = plan.actions.some(action => action.type === 'CLICK' && isDestructiveControl(action.target));
+    return { decision: destructive ? 'BLOCK' : 'ALLOW', risks: destructive ? ['SENSITIVE'] : ['UNKNOWN'], llmDisagreement: false,
+      reasons: [destructive ? 'Destructive actions remain blocked in development mode.' : 'Development mode: sensitivity/unknown-action policy gate disabled; native grounding and verification remain required.'] };
+  }
+  if (isWifiOffPlan(plan) || isWifiOnPlan(plan) || wifiNetworkForPlan(plan) !== undefined) return { decision: 'CONFIRM', risks: ['NAVIGATION', 'DATA_CHANGE'], llmDisagreement: false,
+    reasons: ['Changing Wi-Fi state requires device-bound, single-use confirmation.'] };
   let app = '', searchInput = false;
   const risks: ActionRisk[] = plan.actions.map(action => {
     if (action.type === 'OPEN_APP' || action.type === 'CLOSE_APP') {
@@ -42,9 +56,10 @@ export function assessPlanPolicy(plan: ActionPlan): PolicyDecision {
       searchInput = false;
       return risk;
     }
-    if (isSensitiveControl(action.target)) return 'SENSITIVE';
+    if (isSensitiveControl(action.target, strict)) return 'SENSITIVE';
     searchInput = /^(search_button|address_bar|search_field|search_input)$/.test(action.target) && [APP_PACKAGE_ALIASES.youtube, APP_PACKAGE_ALIASES.chrome].includes(app);
     if (searchInput || action.target === 'back_button') return 'NAVIGATION';
+    if (app === APP_PACKAGE_ALIASES.settings && action.target === 'wifi_settings') return 'NAVIGATION';
     if ((/^video_card_([1-9]\d?)$/.test(action.target) || action.target === 'play_button') && app === APP_PACKAGE_ALIASES.youtube ||
       /^(first_result|result_[1-9]\d?)$/.test(action.target) && app === APP_PACKAGE_ALIASES.chrome) return 'NAVIGATION';
     if (app === APP_PACKAGE_ALIASES.settings && /^(text:)?(ket noi|wi fi|thong tin dien thoai)$/.test(normalizeUiText(action.target))) return 'NAVIGATION';
@@ -68,6 +83,10 @@ export function assertActionNotSensitive(action: Action): void {
   if (action.type === 'CLICK' && isSensitiveControl(action.target)) throw new AndroidExecutionError('CONFIG_ERROR', 'Sensitive UI action is blocked by independent policy.');
 }
 export function assertObservedControlSafe(node: UiNode): void {
+  if (developmentPolicyEnabled()) {
+    if ([node.resourceId, node.text, node.description].some(isDestructiveControl)) throw new AndroidExecutionError('CONFIG_ERROR', 'Destructive UI control is blocked, including in development mode.');
+    return;
+  }
   if (/Switch|CheckBox|RadioButton|ToggleButton/.test(node.className) || isSensitiveControl(node.resourceId) ||
     isSensitiveControl(node.text) || isSensitiveControl(node.description)) throw new AndroidExecutionError('CONFIG_ERROR', 'Observed control changes data/account state or has sensitive semantics; no click was sent.');
 }
@@ -100,4 +119,18 @@ export function assessObservedReadNavigation(snapshot: Observation, node: UiNode
       (/Switch|CheckBox|RadioButton|ToggleButton|EditText/.test(n.className) || isSensitiveControl(n.text + ' ' + n.description + ' ' + n.resourceId))));
   return { decision: trusted ? 'ALLOW' : 'BLOCK', risks: [trusted ? 'NAVIGATION' : 'UNKNOWN'], llmDisagreement: false,
     reasons: [trusted ? 'Observed unique control has goal-related read/search navigation semantics and no data-changing descendants.' : 'Observed control does not prove read-only goal navigation.'] };
+}
+
+export function assessObservedRouteControl(snapshot: Observation, node: UiNode): PolicyDecision {
+  const label = normalizeUiText(node.description || node.text);
+  const approved = /^(navigate up|back|quay lai|dieu huong len|tro ve|more options|more|menu|tuy chon khac|lua chon khac|exit full screen|exit fullscreen|thoat toan man hinh)$/.test(label);
+  const match = [node.description && `accessibility_id:${node.description}`, node.text && `text:${node.text}`, node.resourceId && `id:${node.resourceId}`]
+    .filter(Boolean).map(target => matchUiTarget(snapshot, target as string, true)).find(result => result.status === 'MATCH');
+  const owner = match?.node;
+  const trusted = snapshot.observationStatus === 'OBSERVED' && node.packageName === snapshot.foregroundPackage && node.enabled && node.displayed !== false && approved &&
+    !snapshot.nodes.some(n => /permissioncontroller|packageinstaller/.test(n.packageName) || /WebView/.test(n.className) && isDescendant(snapshot.nodes, node, n)) &&
+    Boolean(owner && !snapshot.nodes.some(n => isDescendant(snapshot.nodes, n, owner) &&
+      (/Switch|CheckBox|RadioButton|ToggleButton|EditText/.test(n.className) || isSensitiveControl(n.text + ' ' + n.description + ' ' + n.resourceId))));
+  return { decision: trusted ? 'ALLOW' : 'BLOCK', risks: [trusted ? 'NAVIGATION' : 'UNKNOWN'], llmDisagreement: false,
+    reasons: [trusted ? 'Unique native reversible navigation control; goal-specific route grounding is still required.' : 'Unproven native route control.'] };
 }

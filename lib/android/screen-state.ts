@@ -25,6 +25,13 @@ export function classifyScreen(packageName: string, nodes: UiNode[]): AndroidScr
   // discovery is a separate condition and may require scrolling below them.
   if (hasQuery && (renderedResults || findYouTubeVideoNodes(visible).length)) return 'SEARCH_RESULTS';
   const watchMetadata = visible.filter(node => node.resourceId.endsWith(':id/video_metadata_layout'));
+  // Some watch pages expose empty metadata. This classifies the destination only;
+  // the selected title still needs independent UI or Media Session verification.
+  const watchPlayers = visible.filter(node => node.resourceId.endsWith(':id/watch_player'));
+  if (!hasQuery && watchPlayers.length === 1 && watchMetadata.length === 1 &&
+    watchPlayers[0].bounds[3] > watchPlayers[0].bounds[1] &&
+    watchMetadata[0].bounds[1] >= watchPlayers[0].bounds[3] &&
+    watchMetadata[0].bounds[3] > watchMetadata[0].bounds[1]) return 'VIDEO_PLAYER';
   if (!hasQuery && visible.some(node => node.resourceId.endsWith(':id/watch_player')) && watchMetadata.length === 1 && visible.some(node => {
     if (!(node.text.trim() || node.description.trim())) return false;
     if (node === watchMetadata[0]) return true;

@@ -1,7 +1,7 @@
 import type { AgentGoal } from './schema';
 import type { ActionCandidate } from './action-candidates';
 import type { Observation } from '../state-observer';
-import { goalPackageAllowed, readNavigationLabel, readLocationVerified, visibleNode } from './navigation-semantics';
+import { goalPackageAllowed, readNavigationLabel, readLocationVerified, visibleNode, verifyCapabilityRoute } from './navigation-semantics';
 import { normalizeUiText, matchUiTarget } from '../ui-understanding';
 import { uiFingerprint, verifyReversibleNavigation, verifyClickTransition } from '../action-verifier';
 import { detectScrollRegion, regionFingerprint } from '../exploration/scroll-regions';
@@ -12,6 +12,7 @@ export function verifyCandidateOutcome(goal: AgentGoal, candidate: ActionCandida
   if (after.observationStatus !== 'OBSERVED' || !goalPackageAllowed(goal, after.foregroundPackage)) return false;
   if (genericNativeGoal(goal) && !nativeContextSafe(goal, after)) return false;
   const verification = candidate.verification;
+  if (verification.kind === 'CAPABILITY_ROUTE') return verifyCapabilityRoute(goal, before, after, verification.label);
   if (verification.kind === 'NAVIGATION_LAYER_REMOVED') return verifyReversibleNavigation(before, after);
   if (verification.kind === 'TARGET_VISIBLE') return candidate.action.type === 'WAIT_FOR' && matchUiTarget(after, candidate.action.target).status === 'MATCH';
   if (verification.kind === 'TARGET_TRANSITION') return candidate.action.type === 'CLICK' && verifyClickTransition(before, after, candidate.action.target) === true;
