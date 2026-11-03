@@ -1,7 +1,8 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
-  /* config options here */
+  outputFileTracingExcludes: { '/*': ['./tests/**/*', './coverage/**/*', './data/**/*', './.env*', './.git/**/*', './.local-drivers/**/*', './android/teach-observer/build/**/*'] },
+  distDir: process.env.TEACH_ISOLATED_BUILD === '1' ? '.next-teach-acceptance' : '.next',
   experimental: {
     agentFeedback: true,
   },

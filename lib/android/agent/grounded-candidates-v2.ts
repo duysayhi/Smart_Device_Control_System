@@ -34,6 +34,20 @@ export interface GroundedCandidateV2 {
 export interface CandidatePage { candidates: GroundedCandidateV2[]; coverage: { observed: number; eligible: number; offered: number; page: number } }
 const issued = new WeakMap<GroundedCandidateV2, string>();
 export const isGroundedCandidate = (candidate: GroundedCandidateV2) => issued.get(candidate) === JSON.stringify(candidate);
+/** Additive manual scroll primitive: same region contract consumed by interactV2. */
+export function issueObservedTeachScroll(node: GoalNodeV2, snapshot: Observation, executionId: string, sessionId: string): GroundedCandidateV2 | undefined {
+  if (node.capability !== 'NAVIGATE' || node.outcome.effect !== 'READ' || node.outcome.negated || node.outcome.ambiguity.length ||
+    snapshot.observationStatus !== 'OBSERVED' || snapshot.foregroundPackage !== node.packageName || Date.now() - snapshot.timestamp < 0 || Date.now() - snapshot.timestamp > 5000 ||
+    snapshot.nodes.some(n => n.focused && /EditText|AutoCompleteTextView/.test(n.className) || /permissioncontroller|packageinstaller/.test(n.packageName) || /keyguard|bouncer/.test(n.resourceId))) return;
+  const region = detectScrollRegion(snapshot, explorationGoal('read navigation'), 'down');
+  if (region.status !== 'FOUND') return;
+  const target = observedAffordances(snapshot, executionId, sessionId).find(a => a.index === region.region.index);
+  if (!target || !target.enabled || target.sensitive || target.destructive || target.packageName !== node.packageName) return;
+  const candidate: GroundedCandidateV2 = { id: 'teach-scroll-' + snapshot.snapshotId, deviceId: snapshot.deviceSerial, executionId, nodeId: node.id,
+    snapshotId: snapshot.snapshotId, sessionId, fingerprint: geometryFingerprint(snapshot), target, action: 'SCROLL', parameterSource: 'USER_REQUEST', effect: 'READ',
+    verification: 'STATE_CHANGED', description: 'Scroll the observed container down' };
+  issued.set(candidate, JSON.stringify(candidate)); return candidate;
+}
 const cleanLabel = (text: string) => foldIntent(text).replace(/^(?:muc|trang|tab|page|section)\s+/, '').trim();
 export function generateGroundedCandidates(node: GoalNodeV2, snapshot: Observation, executionId: string, sessionId: string, expressionObserved: boolean, page = 0, enteredKeys = '', mediaReady = false, recordState?: RecordState, ownerMode = false, searchScope?: SearchScope, temporalScope?: TemporalUiScope, browserScope?: BrowserResultScope, videoScope?: VideoResultScope): CandidatePage {
   const affordances = observedAffordances(snapshot, executionId, sessionId), rows: GroundedCandidateV2[] = [];

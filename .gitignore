@@ -50,3 +50,12 @@ next-env.d.ts
 # Local evaluation inputs; keep sealed and user-authored cohorts off Git.
 /tests/sealed/
 /tests/holdout/
+
+/data/teach-mode/
+
+# Isolated Teach acceptance production output.
+/.next-teach-acceptance/
+
+/android/teach-observer/build/
+*.keystore
+*.jks

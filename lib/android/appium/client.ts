@@ -1,4 +1,5 @@
 import { AndroidExecutionError, checkCancellation } from '../errors';
+import { createHash } from 'node:crypto';
 
 export interface AppiumElement { 'element-6066-11e4-a52e-4f735466cecf': string }
 export interface AppiumSelector { using: 'id' | 'accessibility id' | 'xpath' | 'css selector'; value: string }
@@ -13,6 +14,7 @@ export class AppiumClient {
     }
     this.url = url.replace(/\/$/, '');
   }
+  endpointFingerprint(): string {return createHash('sha256').update(new URL(this.url).href.replace(/\/$/,'')).digest('hex');}
 
   async request<T>(method: string, path: string, body?: unknown, timeoutMs = 15000, signal?: AbortSignal): Promise<T> {
     checkCancellation(signal);

@@ -10,6 +10,7 @@ import { withSessionContextLock } from './session-operation-lock';
 import { allocateSessionPorts, type PortLease } from './port-allocator';
 import { readTransportIdentity, transportMode } from '../transport-identity';
 import { wirelessIdentityAllowed, readWirelessRecords } from '../wireless-store';
+import { verifyNativeSessionAbsent, type NativeLifecycleHook } from './session-lifecycle';
 
 const activeDevices = new Set<string>();
 
@@ -107,7 +108,7 @@ export class ManagedAppiumSession {
   private ports?: PortLease;
   private opening = false;
   constructor(public readonly client: AppiumClient, public readonly serial: string, private readonly run: AdbRunner,
-      private readonly verifyServer = verifyInstalledAppiumServer, private readonly allocatePorts = allocateSessionPorts, private readonly expectedPhysicalId?: string, private readonly observerIdleTimeoutMs?: number) {}
+      private readonly verifyServer = verifyInstalledAppiumServer, private readonly allocatePorts = allocateSessionPorts, private readonly expectedPhysicalId?: string, private readonly observerIdleTimeoutMs?: number, private readonly lifecycle?: NativeLifecycleHook) {}
   get path(): string {
     if (!this.id) throw new AndroidExecutionError('SESSION_ERROR', 'Appium session has not been created.');
     return `/session/${encodeURIComponent(this.id)}`;
@@ -143,6 +144,7 @@ export class ManagedAppiumSession {
     // Never auto-install or initialize APKs. Server skip is allowed only after version checks.
     // Creation is not aborted mid-flight: retain the resulting ID so cancellation can clean it up.
     this.ports = await this.allocatePorts(this.serial);
+    await this.lifecycle?.({kind:'CREATE_INTENT',nativeServerSha256:this.client.endpointFingerprint()});
     this.creationUncertain = true;
     let result: { sessionId: string };
     try {
@@ -167,12 +169,15 @@ export class ManagedAppiumSession {
     if (!result.sessionId) throw new AndroidExecutionError('SESSION_ERROR', 'Appium did not return a Session ID.');
     this.id = result.sessionId;
     this.creationUncertain = false;
+    await this.lifecycle?.({kind:'NATIVE_BOUND',nativeSessionId:this.id});
     checkCancellation(signal);
     await this.ensureActive(signal);
+    await this.lifecycle?.({kind:'BINDING_VERIFIED'});
     await this.client.request('POST', this.path + '/timeouts', { implicit: 0 }, 10000, signal);
     // Animated feeds may never become idle. Keep a bounded session-only idle wait;
     // observer conditions and fresh native validation still decide when an action is safe.
     await this.client.request('POST', this.path + '/appium/settings', { settings: { waitForIdleTimeout: idleTimeout } }, 10000, signal);
+    await this.lifecycle?.({kind:'NATIVE_READY'});
     } finally { this.opening = false; }
   }
   async ensureActive(signal?: AbortSignal): Promise<void> {
@@ -198,11 +203,19 @@ export class ManagedAppiumSession {
     if (this.physicalId && (await readTransportIdentity(this.run, this.serial, true))?.physicalId !== this.physicalId) {
       throw new AndroidExecutionError('SESSION_ERROR', 'Cannot safely clean up Session while its physical device is unavailable or changed. Ownership and ports retained; restore the original transport and inspect.');
     }
-    try { await this.client.request('DELETE', this.path, undefined, 30000); this.id = undefined; }
+    await this.lifecycle?.({kind:'DELETE_INTENT'});
+    try { await this.client.request('DELETE', this.path, undefined, 30000); if(!this.lifecycle)this.id = undefined; }
     catch (error) {
-      if (error instanceof AndroidExecutionError && error.sessionInvalid) { this.id = undefined; }
+      if (error instanceof AndroidExecutionError && error.sessionInvalid) { if(!this.lifecycle)this.id = undefined; }
       else throw error;
     }
+    if(this.lifecycle){
+      await this.lifecycle({kind:'DELETE_ACK'});
+      if(!await verifyNativeSessionAbsent(this.client,this.id!))throw new AndroidExecutionError('SESSION_ERROR','Exact native Session absence is unverified; ownership retained.');
+      await this.lifecycle({kind:'ABSENCE_VERIFIED'});
+      this.id=undefined;
+    }
     await this.ports?.release(); this.ports = undefined;
+    await this.lifecycle?.({kind:'NATIVE_CLOSED'});
   }
 }

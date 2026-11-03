@@ -127,6 +127,7 @@ export function androidV2Adapter(serial: string, budget: AgentBudget): V2Adapter
     const execution = await createExecutionContext(serial, apps.map(app => ({ type: 'OPEN_APP', app: app.packageName })), measuredAdb, signal, {
       executionId: budget.runtimeIdentity?.executionId, beforeSnapshot: source => budget.recordSnapshot(source),
       expectedPhysicalId: budget.runtimeIdentity?.physicalId,
+      nativeLifecycle: budget.nativeLifecycle,
       beforeScroll: () => budget.consume('scrolls'), beforeNavigation: () => budget.consume('steps'),
       observerIdleTimeoutMs: process.env.AGENT_V2_OBSERVER_IDLE_TIMEOUT_MS === undefined ? undefined : Number(process.env.AGENT_V2_OBSERVER_IDLE_TIMEOUT_MS),
       onObservation: ms => { budget.timings.observationMs += ms; },

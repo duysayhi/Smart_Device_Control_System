@@ -48,6 +48,7 @@ export interface ActionOutcome {
   interaction?: { method: string; resourceId: string; className: string; bounds: number[]; evidence: string[] };
 }
 export interface ExecutionAccounting {
+  nativeLifecycle?: import('./appium/session-lifecycle').NativeLifecycleHook;
   observerIdleTimeoutMs?: number;
   expectedPhysicalId?: string;
   requirePlayback?: boolean;
@@ -458,7 +459,7 @@ export async function createExecutionContext(serial: string, actions: Action[], 
     await legacy.preflight(serial, actions, backend === 'adb', backend === 'appium');
     checkCancellation(signal);
     if (backend === 'appium') {
-      session = new ManagedAppiumSession(new AppiumClient(undefined, fetch, accounting?.onRpc), serial, run, undefined, undefined, accounting?.expectedPhysicalId, accounting?.observerIdleTimeoutMs);
+      session = new ManagedAppiumSession(new AppiumClient(undefined, fetch, accounting?.onRpc), serial, run, undefined, undefined, accounting?.expectedPhysicalId, accounting?.observerIdleTimeoutMs, accounting?.nativeLifecycle);
       await session.open(signal);
       await release.recordSession(session.sessionId!, accounting?.executionId);
       executor = new ConditionExecutor(session, run, accounting);

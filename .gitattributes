@@ -1,0 +1,2 @@
+# Preserve reviewed SQL bytes and SHA-256 on every platform, including CRLF migrations.
+*.sql -text whitespace=cr-at-eol

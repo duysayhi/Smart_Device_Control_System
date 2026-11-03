@@ -2,15 +2,21 @@ import { createServer, type IncomingMessage } from 'node:http';
 import { mkdir, readFile, writeFile, rename, unlink, rmdir } from 'node:fs/promises';
 import { appendFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { randomBytes, timingSafeEqual } from 'node:crypto';
+import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { DeviceRuntimeRegistry, type RuntimeAdapter } from './device-runtime';
 import { RuntimeCommand, EvidenceQuery, type DeviceTask } from './runtime-schema';
-import { runtimeDirectory, androidRuntimeDigest } from './runtime-storage';
+import { runtimeDirectory, androidRuntimeDigest, teachRuntimeDigest } from './runtime-storage';
 import { sharedReasoningScheduler } from './reasoning-scheduler';
 import type { WorkerAddress } from './runtime-storage';
 import { z } from 'zod';
 import { CatalogWarmup } from './catalog-warmup';
 import { PreparedCommand } from '../unified-agent/contracts';
+import { TeachCommand } from './teach-contracts';
+import { TeachRuntimeError } from './teach-session';
+import { ReplayCommandSchema } from './skill-replay-adapter';
+import { SkillProgramError } from '../../skills/skill-program';
+import { configuredHistorySink, type HistorySink } from '../../history/history-service';
+import {ownerAuthenticationRuntimeSha256} from '../../owner-auth/certificates';
 
 async function jsonBody(request: IncomingMessage) {
   const chunks: Buffer[] = []; let size = 0;
@@ -19,7 +25,8 @@ async function jsonBody(request: IncomingMessage) {
   }
   return JSON.parse(Buffer.concat(chunks).toString('utf8'));
 }
-export async function startWorker(options: { directory?: string; adapter?: RuntimeAdapter } = {}) {
+export async function startWorker(options: { directory?: string; adapter?: RuntimeAdapter; history?:HistorySink } = {}) {
+  const history=options.history??(!options.adapter?configuredHistorySink(androidRuntimeDigest()):undefined);
   const root = options.directory ?? runtimeDirectory(), lock = join(root, 'owner'); await mkdir(root, { recursive: true });
   try { await mkdir(lock); }
   catch (error) {
@@ -35,19 +42,35 @@ export async function startWorker(options: { directory?: string; adapter?: Runti
   const stateFile = join(root, 'tasks.json'), token = randomBytes(32).toString('hex');
   let writes = Promise.resolve(), stopping = false, saveTimer: ReturnType<typeof setTimeout> | undefined;
   let warmup: CatalogWarmup | undefined, admitting = 0;
+  // Historical projection is opt-in and independent of operational dispatch/journal safety.
+  const flushCheckpoint=async()=>{
+    if(saveTimer){clearTimeout(saveTimer);saveTimer=undefined;}
+    const content=JSON.stringify(registry.persisted());
+    const pending=writes.then(async()=>{await writeFile(stateFile+'.tmp',content,{mode:0o600});await rename(stateFile+'.tmp',stateFile);});
+    writes=pending.catch(error=>{const code=(error as NodeJS.ErrnoException).code;console.error('Runtime checkpoint write failed.',typeof code==='string'&&/^[A-Z0-9_]{1,40}$/.test(code)?code:'IO_ERROR');});await pending;
+    history?.offer(registry.persisted());
+  };
   const registry = new DeviceRuntimeRegistry(options.adapter, () => {
     warmup?.schedule();
     if (saveTimer) return;
     saveTimer = setTimeout(() => {
       saveTimer = undefined; const content = JSON.stringify(registry.persisted());
-      writes = writes.then(async () => { await writeFile(stateFile + '.tmp', content, { mode: 0o600 }); await rename(stateFile + '.tmp', stateFile); }).catch(() => { console.error('Runtime journal write failed.'); });
+      writes = writes.then(async () => { await writeFile(stateFile + '.tmp', content, { mode: 0o600 }); await rename(stateFile + '.tmp', stateFile); history?.offer(JSON.parse(content)); }).catch(() => { console.error('Runtime journal write failed.'); });
     }, 100);
-  });
-  if (!options.adapter) warmup = new CatalogWarmup(() => !stopping && admitting === 0 && registry.ownerTestModes().length === 0 && !registry.list().some(t => !t.finishedAt));
+  },flushCheckpoint);
+  if (!options.adapter) warmup = new CatalogWarmup(() => !stopping && admitting === 0 && !registry.hasTeachSessions() && registry.ownerTestModes().length === 0 && !registry.list().some(t => !t.finishedAt));
   try {
-    const saved = JSON.parse(await readFile(stateFile, 'utf8')) as DeviceTask[];
-    if (Array.isArray(saved)) registry.restore(saved);
-  } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') console.error('Runtime journal could not be restored; nothing will be resumed.'); }
+    const originalJournal=await readFile(stateFile,'utf8'),saved = JSON.parse(originalJournal) as DeviceTask[];
+    if (!Array.isArray(saved)) throw new Error('Invalid task journal.');
+    registry.restore(saved,createHash('sha256').update(originalJournal).digest('hex'));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+      // Preserve the original file and device locks; never start with an empty
+      // registry that would overwrite a corrupt/unsupported recovery journal.
+      await warmup?.close();await unlink(join(lock,'pid.json'));await rmdir(lock);
+      throw new Error('WORKER_JOURNAL_INVALID: original checkpoint retained; operator inspection required.');
+    }
+  }
   const server = createServer(async (request, response) => {
     response.setHeader('Content-Type', 'application/json'); response.setHeader('Cache-Control', 'no-store');
     const received = Buffer.from(request.headers.authorization ?? ''), expected = Buffer.from('Bearer ' + token);
@@ -63,6 +86,7 @@ export async function startWorker(options: { directory?: string; adapter?: Runti
         response.setHeader('Content-Type', 'image/png'); response.end(Buffer.from(visual.image.dataUrl.slice('data:image/png;base64,'.length), 'base64')); return;
       }
       if (request.url === '/shutdown' && request.method === 'POST') {
+        if(registry.administrativeReauthorizationPending())throw new Error('Cannot stop during administrative reauthorization.');
         const input = await jsonBody(request).catch(() => ({}));
         const cancelActive = z.object({ cancelActive: z.literal(true) }).strict().safeParse(input).success;
         if (registry.list().some(task => !task.finishedAt) && !cancelActive) throw new Error('Cannot stop a worker with active executions.');
@@ -85,10 +109,31 @@ export async function startWorker(options: { directory?: string; adapter?: Runti
         const devices = await registry.refreshConnections();
         warmup?.connected(devices);
         const tasks = registry.list();
+        history?.offer(registry.persisted(),devices);
         for (const task of tasks) if (task.latest?.visual?.image) {
           task.latest.visual.image.dataUrl = '/api/agent/runtime?' + new URLSearchParams({ executionId: task.executionId, deviceId: task.deviceId, evidenceId: task.latest.visual.id }).toString();
         }
-        response.end(JSON.stringify({ tasks, devices, reasoning: sharedReasoningScheduler.summary(), ownerTestModes: registry.ownerTestModes(), ownerPolicyAudit: registry.ownerPolicyAudit() })); return;
+        // The durable native binding belongs to the authenticated recovery path,
+        // not the general Dashboard task/history response.
+        response.end(JSON.stringify({ tasks:tasks.map(task=>({...task,teachLifecycle:undefined,administrativeAdmission:undefined})), devices, reasoning: sharedReasoningScheduler.summary(), ownerTestModes: registry.ownerTestModes(), ownerPolicyAudit: registry.ownerPolicyAudit(),historyProjection:history?.status()??'NOT_CONFIGURED' })); return;
+      }
+      if(request.url==='/replay'&&request.method==='POST'&&!stopping){
+        const parsed=ReplayCommandSchema.safeParse(await jsonBody(request));
+        if(!parsed.success){response.writeHead(400).end(JSON.stringify({code:'INVALID_REPLAY_COMMAND'}));return;}
+        admitting++;
+        try{await warmup?.pause();response.end(JSON.stringify(await registry.replay(parsed.data)));}
+        catch(error){response.writeHead(409).end(JSON.stringify({code:error instanceof TeachRuntimeError||error instanceof SkillProgramError?error.code:'REPLAY_COMMAND_REJECTED'}));}
+        finally{admitting--;warmup?.schedule();}return;
+      }
+      if (request.url === '/teach' && request.method === 'POST' && !stopping) {
+        const parsed = TeachCommand.safeParse(await jsonBody(request));
+        if (!parsed.success) { response.writeHead(400).end(JSON.stringify({ code: 'INVALID_TEACH_COMMAND' })); return; }
+        admitting++;
+        try {
+          await warmup?.pause(); response.end(JSON.stringify(await registry.teach(parsed.data)));
+        } catch (error) { response.writeHead(409).end(JSON.stringify({ code: error instanceof TeachRuntimeError ? error.code : 'TEACH_COMMAND_FAILED' })); }
+        finally { admitting--; warmup?.schedule(); }
+        return;
       }
       if (request.url === '/planning' && request.method === 'POST' && !stopping) {
         const command = PreparedCommand.parse(await jsonBody(request));
@@ -128,8 +173,8 @@ export async function startWorker(options: { directory?: string; adapter?: Runti
   });
   await new Promise<void>((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', () => resolve()); });
   const address = server.address(); if (!address || typeof address === 'string') throw new Error('No worker address.');
-  const metadata: WorkerAddress = { port: address.port, token, pid: process.pid, protocol: 1, features: ['unified-prepared-plan', 'agent-v2', 'owner-test-mode', 'full-control-test-mode', 'source-policy-v2'],
-    runtimeSha256: androidRuntimeDigest(), observerIdleTimeoutMs: Number(process.env.AGENT_V2_OBSERVER_IDLE_TIMEOUT_MS ?? process.env.ANDROID_OBSERVER_IDLE_TIMEOUT_MS ?? 1000) };
+  const metadata: WorkerAddress = { port: address.port, token, pid: process.pid, protocol: 1, features: ['unified-prepared-plan', 'agent-v2', 'owner-test-mode', 'full-control-test-mode', 'source-policy-v2', 'teach-step-v1','skill-replay-v1','teach-recovery-v1','teach-admin-admission-v1','teach-clearance-reauthorization-v1','teach-continuation-v1'],
+    runtimeSha256: androidRuntimeDigest(), teachRuntimeSha256: teachRuntimeDigest(), ownerAuthSha256:(()=>{try{return ownerAuthenticationRuntimeSha256();}catch{return undefined;}})(), observerIdleTimeoutMs: Number(process.env.AGENT_V2_OBSERVER_IDLE_TIMEOUT_MS ?? process.env.ANDROID_OBSERVER_IDLE_TIMEOUT_MS ?? 1000) };
   await writeFile(join(root, 'address.json'), JSON.stringify(metadata), { mode: 0o600 });
   const shutdown = async () => {
     if (stopping) return; stopping = true;
@@ -137,6 +182,7 @@ export async function startWorker(options: { directory?: string; adapter?: Runti
     await registry.shutdown();
     if (saveTimer) { clearTimeout(saveTimer); saveTimer = undefined; }
     await writes; await writeFile(stateFile, JSON.stringify(registry.persisted()), { mode: 0o600 });
+    history?.offer(registry.persisted());await history?.drain();
     await new Promise<void>(resolve => server.close(() => resolve()));
     await unlink(join(root, 'address.json')); await unlink(join(lock, 'pid.json')); await rmdir(lock);
     process.removeListener('SIGINT', onSignal); process.removeListener('SIGTERM', onSignal);

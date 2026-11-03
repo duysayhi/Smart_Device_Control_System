@@ -10,6 +10,7 @@ export interface ReasoningMeasurement {
   outputTokens?: number; evalMs?: number; status: 'VALID' | 'TIMEOUT' | 'HTTP_ERROR' | 'INVALID_JSON' | 'UNAVAILABLE' | 'CANCELLED' | 'CONTEXT_LIMIT';
 }
 export class AgentBudget {
+  nativeLifecycle?: import('../appium/session-lifecycle').NativeLifecycleHook;
   readonly measurements: { layer: 'ADB' | 'APPIUM' | 'XML' | 'CATALOG'; kind: string; elapsedMs: number; offsetMs: number }[] = [];
   measure(layer: 'ADB' | 'APPIUM' | 'XML' | 'CATALOG', kind: string, elapsedMs: number) { if (this.measurements.length < 1024) this.measurements.push({ layer, kind, elapsedMs, offsetMs: performance.now() - this.started }); }
   readonly queueOwner = randomUUID();

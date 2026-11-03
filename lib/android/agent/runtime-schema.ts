@@ -14,6 +14,9 @@ export const RuntimeCommand = z.discriminatedUnion('type', [
 export type RuntimeCommandValue = z.infer<typeof RuntimeCommand>;
 export type ExecutionStatus = 'QUEUED' | 'RUNNING' | 'WAITING_HUMAN' | 'COMPLETED' | 'BLOCKED' | 'FAILED' | 'CANCELLED' | 'DISCONNECTED';
 export interface DeviceTask {
+  administrativeAdmission?: import('../../skills/legacy-retirement-contracts').AdministrativeAdmission;
+  teachLifecycle?: import('./teach-lifecycle').TeachLifecycle;
+  skillReplay?: { checkpoint: import('../../skills/replay-contracts').ReplayCheckpoint; events: Readonly<Record<string,unknown>>[] };
   ownerTestMode?: import('./owner-test-policy').OwnerTestMode;
   agentVersion?: 2;
   physicalId?: string;

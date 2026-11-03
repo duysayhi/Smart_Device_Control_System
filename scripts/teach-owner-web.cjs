@@ -1,0 +1,9 @@
+const fs=require('node:fs'),path=require('node:path'),http=require('node:http'),crypto=require('node:crypto');
+const envFile=process.env.PHONE_COMMANDER_ENV_FILE;if(envFile)process.loadEnvFile(envFile);delete process.env.PHONE_COMMANDER_ENV_FILE;
+process.env.NEXT_TELEMETRY_DISABLED='1';process.env.HISTORY_STORAGE_MODE='OFF';process.env.TEACH_ENABLE_SUPERVISED_REPLAY='0';process.env.AGENT_CLOUD_REASONING_ENABLED='false';process.env.AGENT_GROQ_ENABLED='false';process.env.AGENT_GROQ_SEND_COMMAND_TEXT='false';
+process.env.TEACH_STORAGE_MODE='POSTGRESQL';process.env.TEACH_DATABASE_SCHEMA='teach_mode';
+if(!/^[a-f0-9]{64}$/.test(process.env.TEACH_EXPECTED_BRANCH_SHA256??''))throw Error('TEACH_BRANCH_FINGERPRINT_REQUIRED');
+async function main(){const port=49861,app=require('next')({dev:true,dir:process.cwd(),hostname:'localhost',port});await app.prepare();const handler=app.getRequestHandler(),server=http.createServer((req,res)=>handler(req,res));await new Promise((resolve,reject)=>{server.once('error',reject);server.listen(port,'127.0.0.1',resolve);});
+ if(process.env.PHONE_COMMANDER_WEB_STATE_FILE)fs.writeFileSync(process.env.PHONE_COMMANDER_WEB_STATE_FILE,JSON.stringify({pid:process.pid,port,cwdSha256:crypto.createHash('sha256').update(process.cwd().toLowerCase()).digest('hex'),purpose:'TEACH_CONTINUATION_ACCEPTANCE',storageMode:'POSTGRESQL',supervisedReplayEnabled:false,nativeActionsByLauncher:0}));console.log('TEACH_OWNER_WEB_READY http://localhost:'+port+'/owner');
+ let closing=false;const stop=async()=>{if(closing)return;closing=true;server.closeAllConnections();await new Promise(resolve=>server.close(resolve));await app.close();};process.on('SIGINT',()=>void stop());process.on('SIGTERM',()=>void stop());
+}main().catch(()=>{console.error('TEACH_OWNER_WEB_START_FAILED');process.exitCode=1;});

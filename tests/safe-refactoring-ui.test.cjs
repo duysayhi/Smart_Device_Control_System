@@ -12,7 +12,7 @@ test('OFFLINE characterization: initial Dashboard markup after unified single-pa
   try {
     const Dashboard = require('../app/page.tsx').default;
     const html = renderToStaticMarkup(React.createElement(Dashboard));
-    assert.equal(createHash('sha256').update(html).digest('hex'), '270d9f325288d05c9dbdb1f305fc8b733e95ef1c97bd5c1101939f08c3602e84');
+    assert.equal(createHash('sha256').update(html).digest('hex'), '94c70e523cc4f56d9826909b5cd2d7111d1d862a96edb0a30804a7e75a1238c3');
     assert.match(html, /Tác vụ Android/); assert.match(html, /Lịch sử Agent/);
     assert.doesNotMatch(html, /Hàng đợi tác vụ \(Task Queue\)/);
   } finally { global.fetch = originalFetch; }

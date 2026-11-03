@@ -7,16 +7,17 @@ interface Connection {
   serial: string; ip: string; port: number; physicalId?: string; model?: string;
   state: string; lastConnectedAt?: number; error?: string; currentSessionId?: string; currentExecutionId?: string;
 }
-export function ConnectionHistory({ connections, pending, onCommand }: {
+export function ConnectionHistory({ connections, pending, onCommand,operationalOnly=false }: {
   connections: Connection[]; pending: boolean;
+  operationalOnly?:boolean;
   onCommand: (command: { type: 'RECONNECT' | 'DISCONNECT'; serial: string }) => void;
 }) {
   const recent = connections.map((connection, index) => ({ connection, index }))
     .sort((a, b) => (b.connection.lastConnectedAt ?? 0) - (a.connection.lastConnectedAt ?? 0) || b.index - a.index);
   if (!recent.length) return null;
-  return <section aria-label="Lịch sử kết nối" className="min-w-0 border-t border-slate-200 pt-3">
+  return <section aria-label={operationalOnly?'Endpoint Wi-Fi runtime':'Lịch sử kết nối'} className="min-w-0 border-t border-slate-200 pt-3">
     <div className="mb-2 flex items-center justify-between gap-2 text-xs">
-      <h3 className="font-semibold">Lịch sử kết nối</h3>
+      <h3 className="font-semibold">{operationalOnly?'Endpoint Wi-Fi đã tin cậy (runtime)':'Lịch sử kết nối'}</h3>
       <span className="text-slate-500">{recent.length} kết nối</span>
     </div>
     <div role="region" aria-label="Danh sách lịch sử kết nối" tabIndex={0}
@@ -132,7 +133,7 @@ export function ConnectionManager({ devices, selectedSerial, onSelect, onRefresh
         <label className="flex w-32 flex-col gap-1 text-xs">TCP/IP port<input type="number" min="1024" max="65535" required value={tcpPort} onChange={e => setTcpPort(e.target.value)} className={inputClass} /></label>
         <button disabled={pending} className={buttonClass}><Wifi size={14} />Chuyển sang Wi-Fi</button>
       </form>
-      <ConnectionHistory connections={connections} pending={pending} onCommand={body => void command(body)} />
+      <ConnectionHistory connections={connections} pending={pending} operationalOnly onCommand={body => void command(body)} />
     </div>}
     {pending && <p role="status" className="mt-2 text-xs text-indigo-700">Đang xử lý kết nối…</p>}
     {message && <p role="status" className="mt-2 break-words text-xs text-emerald-700">{message}</p>}

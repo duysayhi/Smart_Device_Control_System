@@ -71,7 +71,7 @@ export async function listAndroidDevices(): Promise<AndroidAdbDevice[]> {
   for (const device of devices) {
     if (device.status !== 'device') continue;
     const identity = await readTransportIdentity(runAdb, device.serial);
-    if (identity) { device.physicalId = identity.physicalId; device.identityVerified = device.connectionType === 'USB' || await wirelessIdentityAllowed(device.serial, identity.physicalId); }
+    if (identity) { device.physicalId = identity.physicalId; device.identityVerified = device.connectionType === 'USB' || await wirelessIdentityAllowed(device.serial, identity.physicalId); device.manufacturer=identity.manufacturer;device.osVersion=identity.osVersion; }
   }
   return devices;
 }

@@ -172,7 +172,7 @@ export function UnifiedAgentPanel(props: Props) {
       </div>)}
     </section>}
     {nativeTaskId && <AgentGoalPanel text={text} onText={onText} devices={devices} serial={current?.plan.deviceId ?? serial} onSerial={onSerial} onRefresh={onRefresh} runtime={assistanceRuntime} selectedDeviceIds={props.selectedDeviceIds} controlsMode="results" inspectedExecutionId={nativeTaskId} />}
-    {entries.length > 0 && <details><summary>Lịch sử Unified Agent ({entries.length})</summary><ul className="max-h-48 overflow-y-auto divide-y">{[...entries].reverse().map(e => <li key={e.id}><button type="button" className="text-left w-full py-2 break-words" onClick={() => setSelected(e.id)}>{e.plan.source} - {e.status} - {e.plan.engine}</button></li>)}</ul></details>}
+    {entries.length > 0 && <details><summary>Tác vụ Unified trong phiên runtime ({entries.length})</summary><ul className="max-h-48 overflow-y-auto divide-y">{[...entries].reverse().map(e => <li key={e.id}><button type="button" className="text-left w-full py-2 break-words" onClick={() => setSelected(e.id)}>{e.plan.source} - {e.status} - {e.plan.engine}</button></li>)}</ul></details>}
     </div>
   </section>;
 }

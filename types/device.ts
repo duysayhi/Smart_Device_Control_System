@@ -39,6 +39,7 @@ export interface Device {
 export type AndroidAdbStatus = 'device' | 'offline' | 'unauthorized' | 'unknown';
 
 export interface AndroidAdbDevice {
+  manufacturer?:string;
   physicalId?: string;
   identityVerified?: boolean;
   busy?: boolean;

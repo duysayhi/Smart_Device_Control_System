@@ -1,0 +1,4 @@
+# Exact, reviewed false positives only; keep the default scanner rules enabled.
+# Historical test-summary prose was misclassified as a credential.
+01525d92412eb1779855beec0e359037a79873d0:docs/general-purpose-agent-v2-capability-completion-report.md:generic-api-key:114
+docs/general-purpose-agent-v2-capability-completion-report.md:generic-api-key:114
